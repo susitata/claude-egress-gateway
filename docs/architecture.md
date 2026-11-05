@@ -185,7 +185,7 @@ PAC 的常见写法是 `return "PROXY 127.0.0.1:7891; DIRECT"`。分号后面的
 
 ## 7. 已知限制
 
-- **WebRTC 绕过 HTTP 代理**。`--proxy-server` 只代理 TCP，`RTCPeerConnection` 会直接向 STUN 服务器发 UDP，暴露本机真实出口。示例配置用 `--force-webrtc-ip-handling-policy=disable_non_proxied_udp` 缓解，可用 `chrome://webrtc-internals` 验证。给 VPS IP 加 `/32` 路由**不能**解决这个问题——它只固定"到 VPS 的 SSH 外层连接"，与发往任意 STUN 服务器的 UDP 无关。
+- **WebRTC 绕过 HTTP 代理**。`--proxy-server` 只代理 TCP，`RTCPeerConnection` 会直接向 STUN 服务器发 UDP，暴露本机真实出口。浏览器层的 `--force-webrtc-ip-handling-policy` 在新版 Chrome 上实测无效，只有网络层（TUN / 防火墙阻断 UDP）能解决。给 VPS IP 加 `/32` 路由同样**不能**解决这个问题——它只固定"到 VPS 的 SSH 外层连接"。
 - **机房 IP 就是机房 IP**。能保证的是一致性与可靠性，不承诺绕过任何风控。claude.ai 的 Cloudflare 挑战在机房 IP 上通常需要 30–90 秒才放行，这是预期行为，不是故障。
 - **单点**。VPS 挂了就没有出口，CLI 与网页一起不可用。这是有意的设计，不是待修的 bug——引入备用出口就会引入"当前到底走哪条"的不确定性。
 - **并发与 UDP 受限**。单条 SSH 隧道 + `-L` 转发不承载 UDP，高并发场景下吞吐会受队头阻塞影响。

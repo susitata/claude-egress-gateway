@@ -49,13 +49,11 @@ Get-NetTCPConnection -OwningProcess $p.Id -State Established |
 
 `--proxy-server` 只代理 TCP。浏览器里的 `RTCPeerConnection` 会直接向 STUN 服务器发 UDP，拿到本机真实公网 IP（`srflx` 候选）。**这与是否运行 TUN 客户端无关**，也不是"容易被忽略的小问题"——任何页面无需用户交互就能做这件事。
 
-缓解：
+缓解：**只有网络层可靠**——让 UDP 也进隧道（TUN 模式），或在操作系统层阻断除回环外的 UDP 出站。
 
-```
---force-webrtc-ip-handling-policy=disable_non_proxied_udp
-```
+`--force-webrtc-ip-handling-policy=disable_non_proxied_udp` 在实测的 Chrome 156 上**不生效**（Chromium issue 41180783），即使参数出现在命令行里。本仓库因此不再默认添加它：留着只会制造"已经处理过"的错觉。
 
-本仓库的 `config.example.json` 已包含该参数。验证：打开 `chrome://webrtc-internals`，确认候选里**没有**你的家宽地址。
+验证：`chrome://webrtc-internals` 或 CreepJS，确认候选里**没有**你的家宽地址；只出现 `.local`（mDNS）或出口 IP 才算干净。**不要**用 JS 覆盖 `RTCPeerConnection`——原型链的不一致反而更容易被识别。
 
 > **更正**：早先文档把"给 VPS IP 加 `/32` 路由"写成 WebRTC/UDP 泄漏的缓解手段，这是错的。`/32` 只固定"到 VPS 的那条 SSH 外层连接"走物理网卡，对发往任意 STUN 服务器的 UDP 完全无效。
 

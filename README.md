@@ -160,6 +160,7 @@ python browser/launch.py --config config.local.json --profile claude
 └── docs/
     ├── architecture.md           # design and chain (中文)
     ├── security.md               # coverage boundary + hardening (中文)
+    ├── lessons.md                # field conclusions and pitfalls (中文)
     ├── troubleshooting.md        # symptom → cause → fix (中文)
     └── benchmarks.md             # measured numbers (中文)
 ```
@@ -189,6 +190,7 @@ Numbers depend on the path between you and the region. See [`docs/benchmarks.md`
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | 12 real failure cases: symptom → root cause → verification → fix. <br> 12 个真实故障案例。 |
 | [`docs/benchmarks.md`](docs/benchmarks.md) | cubic vs BBR measurements and the reproduction commands. <br> cubic/BBR 实测与复现命令。 |
 | [`docs/security.md`](docs/security.md) | What is and is not covered, plus the hardening checklist (WebRTC, DNS, IPv6, sandbox, ACLs, VPS). <br> 覆盖边界与加固清单。 |
+| [`docs/lessons.md`](docs/lessons.md) | Conclusions from the field: BBR, bot challenges, IP reputation, WebRTC, fingerprint layers, audit method. <br> 实测结论与踩坑记录。 |
 | [`vps/setup.md`](vps/setup.md) | VPS build, hardening, Elastic IP change checklist. <br> VPS 搭建、加固、换 IP 清单。 |
 
 All Chinese docs assume the reader already has a working SSH key and a VPS. / 中文文档默认你已有可用的 SSH 密钥与 VPS。
@@ -201,14 +203,14 @@ All Chinese docs assume the reader already has a working SSH key and a VPS. / �
 - **The VPS IP is a placeholder.** Replace `YOUR_VPS_IP` locally; do not commit it if you intend to keep the host private.
 - **This is not a guarantee against platform risk controls.** It is a consistency and reliability tool. Datacenter IPs are still datacenter IPs.
 - **Scope is per process, not per machine.** Only the `claude` process (or the Chrome instance) this launcher starts is covered. IDE extensions, other terminals, and proxy-unaware child processes can still go direct.
-- **WebRTC bypasses HTTP proxies.** The example config sets `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`; verify with `chrome://webrtc-internals`. A `/32` route does **not** fix UDP.
+- **WebRTC bypasses HTTP proxies, and browser flags do not fix it.** On Chrome 156 the `--force-webrtc-ip-handling-policy` switch is ignored (Chromium 41180783); only network-level blocking (TUN / firewall) works. Verify with `chrome://webrtc-internals` or CreepJS. A `/32` route does **not** fix UDP.
 - **Local port 7891 has no authentication.** Any local process can borrow your egress.
 
 - **不含任何凭据**，示例配置里没有密码，`.gitignore` 排除了密钥与本地配置。
 - **VPS IP 是占位符**，真实值不要提交。
 - **本项目不承诺绕过任何风控**，它解决的是"出口一致性与可靠性"。
 - **覆盖范围是进程级，不是整机**：只有本次启动的 `claude` 或 Chrome 实例被覆盖；IDE 插件、其它终端、不认代理的子进程仍可能直连。
-- **WebRTC 绕过 HTTP 代理**：示例配置已加 `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`，用 `chrome://webrtc-internals` 自查；`/32` 路由**不能**解决 UDP。
+- **WebRTC 绕过 HTTP 代理，且浏览器参数修不掉**：Chrome 156 上 `--force-webrtc-ip-handling-policy` 实测无效（Chromium 41180783），只有网络层（TUN / 防火墙阻断 UDP）能解决，用 `chrome://webrtc-internals` 或 CreepJS 自查；`/32` 路由**不能**解决 UDP。
 - **本地 7891 无认证**：本机任何进程都能借用你的出口。
 
 完整清单见 [`docs/security.md`](docs/security.md)。

@@ -11,7 +11,6 @@
     "--disable-background-timer-throttling",
     "--disable-backgrounding-occluded-windows",
     "--disable-renderer-backgrounding",
-    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
     "--dns-prefetch-disable"
   ],
   "user_data_dir": null,
