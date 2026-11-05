@@ -9,6 +9,7 @@ pip install -r requirements.txt
 
 copy config.example.json config.local.json
 # edit config.local.json -> proxy.server = http://127.0.0.1:7891
+#                         -> expected_ip  = <your VPS public IP>
 
 python launch.py --config config.local.json --profile work
 ```
@@ -21,10 +22,13 @@ python launch.py --config config.local.json --profile work
 |---|---|
 | `channel: "chrome"` | Uses the locally installed Chrome instead of bundled chromium. |
 | `proxy.server` (fixed) | A PAC file ending in `; DIRECT` falls back to a direct connection. A fixed server cannot. |
-| `fail_closed: true` | TCP-probes the proxy before launch and exits non-zero if it is unreachable. |
+| `proxy.bypass` | Without it, Patchright adds `--proxy-bypass-list=<-loopback>`, which sends `localhost` *through* the tunnel to the VPS. |
+| `fail_closed: true` | TCP-probes the proxy **and** verifies the egress IP before launch; exits non-zero otherwise. |
+| `expected_ip` | Pinned egress address. Empty value + `fail_closed` means "refuse to start". |
+| `chromium_sandbox: true` | Patchright otherwise adds `--no-sandbox`; a compromised renderer would run as you. |
 | `no_viewport: true` | Lets the window size come from the real window, not a fixed emulated viewport. |
 | `timezone_id` / `locale` | CDP-level overrides so the browser is consistent with the exit region. **This does not change the system timezone.** |
-| anti-throttling args | Keeps a background window's timers running, so a slow page doesn't stall when it loses focus. |
+| anti-throttling args | Keeps a background window's timers running, so a slow page doesn't stall when it loses focus. These are themselves detectable; see `docs/security.md`. |
 
 ## Probes
 

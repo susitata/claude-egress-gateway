@@ -105,7 +105,7 @@ ssh -v -N -L 127.0.0.1:7891:127.0.0.1:7890 claude-vps   # 看到 forward 成功�
 
 端口不监听就是隧道问题，不用翻浏览器配置。
 
-**解决**：补齐 `BatchMode=yes`、`ExitOnForwardFailure=yes`、`ServerAliveInterval=15`、`ServerAliveCountMax=4`、`TCPKeepAlive=yes`；再用 `watch-tunnel.ps1` 每 20 秒查端口，不在就重拉，并放进启动项。这样掉线最多 20 秒不可用，而不是第二天才发现。
+**解决**：补齐 `BatchMode=yes`、`ExitOnForwardFailure=yes`、`ConnectTimeout=10`、`ServerAliveInterval=15`、`ServerAliveCountMax=4`、`TCPKeepAlive=yes`；再用 `watch-tunnel.ps1` 每 20 秒查端口，不在就重拉，并放进启动项。最坏情况是"20 秒发现 + 10 秒重建等待"，约 30 秒不可用，而不是第二天才发现。
 
 ---
 
@@ -140,7 +140,7 @@ ssh -G claude-vps | findstr /i hostname
 curl.exe -s -x http://127.0.0.1:7891 https://api.ipify.org
 ```
 
-**解决**：把清单上的引用全部改成新 IP。这个报错是 fail-closed 在正常工作，不是 bug；不要为了"先跑起来"删掉 `-ExpectedIp`，那只会把"启动失败"换成"悄悄走错出口"。
+**解决**：把清单上的引用全部改成新 IP。这个报错是 fail-closed 在正常工作，不是 bug；不要为了"先跑起来"删掉 `-ExpectedIp`——现在是**必填**（或设 `CLAUDE_EGRESS_EXPECTED_IP`），删掉只会把"启动失败"换成"悄悄走错出口"。
 
 ---
 
@@ -169,7 +169,7 @@ Test-NetConnection YOUR_VPS_IP -Port 22
 
 **根因**：PowerShell 5.1 对无 BOM 的 UTF-8 按系统 ANSI 代码页解码，文件本身没坏；进度条是默认行为。
 
-**验证方法**：`$PSVersionTable.PSVersion`；`Get-Content .\watch-tunnel.ps1 -Encoding Byte -TotalCount 3`，前三个字节不是 `239 187 191` 即无 BOM。
+**验证方法**：`$PSVersionTable.PSVersion`；`Get-Content .\scripts\watch-tunnel.ps1 -Encoding Byte -TotalCount 3`，前三个字节不是 `239 187 191` 即无 BOM。
 
 **解决**：`.ps1` 保持纯 ASCII（注释也用英文），中文提示放 `.bat`/`.md` 或改用 Python；必须在终端显示中文就用 Windows Terminal 并存为带 BOM 的 UTF-8。进度条用 `$ProgressPreference = 'SilentlyContinue'` 抑制。本仓库三个脚本都遵守纯 ASCII 约定。
 

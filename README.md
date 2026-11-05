@@ -50,12 +50,12 @@
 
 | | |
 |---|---|
-| **Fail-closed** | Preflight checks the local port, the egress IP, and API reachability. Any failure aborts — no silent direct fallback. <br> 启动前校验本地端口、出口 IP、API 可达性；任一失败即中止，**不会**静默回退直连。 |
-| **Fixed exit** | A single Elastic IP, verified on every launch. <br> 固定 Elastic IP，每次启动都核对。 |
-| **Fast on lossy paths** | BBR + fq on the VPS. Measured 7–15× throughput improvement over cubic. <br> VPS 开 BBR + fq，实测吞吐提升 7–15 倍。 |
+| **Fail-closed** | Preflight verifies the port, **who owns it** (must be the expected `ssh.exe` forward), the egress IP, and API reachability. Any failure aborts — no silent direct fallback, and no "pinning" is optional. <br> 启动前校验本地端口、**端口属主**（必须是期望的 ssh 转发）、出口 IP、API 可达性；任一失败即中止，**不会**静默回退直连，出口 IP 也不允许不设。 |
+| **Fixed exit** | A single Elastic IP, verified on every launch — including when the browser is started directly. <br> 固定 Elastic IP，每次启动都核对——直接启动浏览器时同样核对。 |
+| **Fast on lossy paths** | BBR + fq on the VPS. Measured 7–15× single-stream improvement (14→217 KB/s); 4 concurrent ≈2.7× (87→237 KB/s). <br> VPS 开 BBR + fq：单流提升 7–15 倍（14→217 KB/s），4 并发约 2.7 倍（87→237 KB/s）。 |
 | **No PAC** | PAC returns `PROXY x; DIRECT`, which falls back to direct. A fixed `proxy.server` fails instead. <br> PAC 会 `PROXY; DIRECT` 回退直连；固定代理直接失败。 |
 | **Real browser** | Patchright + the locally installed Chrome, persistent profile, real GPU, no JS hooks. <br> Patchright + 本机真实 Chrome，持久化 profile，不注入 JS。 |
-| **Self-diagnosing** | `probe_*.py` scripts for page state, resource loading, login flow, and environment. <br> 四个诊断脚本，分别定位页面、资源、登录、环境问题。 |
+| **Self-diagnosing** | Three `probe_*.py` scripts for environment, resource timing, and login flow. <br> 三个诊断脚本，分别定位环境、资源加载、登录流程问题。 |
 
 ---
 
@@ -70,7 +70,7 @@
 
 ### 1. VPS setup / VPS 配置
 
-See [`vps/setup.md`](vps/setup.md). Short version / 简版：
+See [`vps/setup.md`](vps/setup.md). The snippet below assumes §2–3 of that page are already done (binary installed, `sing-box` user and `/etc/sing-box` created, systemd unit written). / 下面的片段**假定**你已完成 `vps/setup.md` 第 2–3 节（安装二进制、创建用户与目录、写 systemd 单元）。简版：
 
 ```bash
 # sing-box: mixed inbound on 127.0.0.1:7890, direct outbound
@@ -96,12 +96,16 @@ Security group: allow **22 only**. Nothing else needs to be open.
 ```
 Host claude-vps
     HostName YOUR_VPS_IP
-    User ubuntu
+    User ec2-user          # Debian/Ubuntu images use 'ubuntu' or 'debian'
     IdentityFile C:/Users/<you>/.ssh/your-key.pem
     IdentitiesOnly yes
+    StrictHostKeyChecking yes
+    AddressFamily inet
     ServerAliveInterval 15
     ServerAliveCountMax 4
 ```
+
+Run `ssh claude-vps` once interactively to accept the host key; the tunnel uses `BatchMode=yes` and will not answer a prompt.
 
 ### 3. Claude Code
 
@@ -121,9 +125,15 @@ powershell -ExecutionPolicy Bypass -File scripts\start-claude-egress.ps1 `
     -SshHost claude-vps -ExpectedIp YOUR_VPS_IP -Web -BrowserDir C:\path\to\browser
 ```
 
-Copy `browser/config.example.json` → `browser/config.local.json`, set `proxy.server`, then run `browser/launch.py --config config.local`.
+Copy `browser/config.example.json` → `browser/config.local.json`, set `proxy.server` **and** `expected_ip`, then run:
 
-复制 `browser/config.example.json` 为 `config.local.json`，填好代理，再运行 `launch.py --config config.local`。
+复制 `browser/config.example.json` 为 `config.local.json`，填好 `proxy.server` **和** `expected_ip`，再运行：
+
+```powershell
+python browser/launch.py --config config.local.json --profile claude
+```
+
+`fail_closed: true` with an empty `expected_ip` refuses to start — that is intentional.
 
 > **Note on the first page load / 首次加载** — claude.ai serves a Cloudflare challenge on datacenter IPs. Expect 30–90 s before the login form appears. It is not stuck; do not close the window.
 > 机房 IP 上 claude.ai 会出 Cloudflare 验证页，通常 30–90 秒后才出现登录框，不是卡死，别关窗口。
@@ -149,6 +159,7 @@ Copy `browser/config.example.json` → `browser/config.local.json`, set `proxy.s
 │   └── sysctl-bbr.conf
 └── docs/
     ├── architecture.md           # design and chain (中文)
+    ├── security.md               # coverage boundary + hardening (中文)
     ├── troubleshooting.md        # symptom → cause → fix (中文)
     └── benchmarks.md             # measured numbers (中文)
 ```
@@ -177,6 +188,7 @@ Numbers depend on the path between you and the region. See [`docs/benchmarks.md`
 | [`docs/architecture.md`](docs/architecture.md) | Design, per-hop data flow, trade-offs, fail-closed gates. <br> 架构、逐跳数据流、取舍、四道闸。 |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | 12 real failure cases: symptom → root cause → verification → fix. <br> 12 个真实故障案例。 |
 | [`docs/benchmarks.md`](docs/benchmarks.md) | cubic vs BBR measurements and the reproduction commands. <br> cubic/BBR 实测与复现命令。 |
+| [`docs/security.md`](docs/security.md) | What is and is not covered, plus the hardening checklist (WebRTC, DNS, IPv6, sandbox, ACLs, VPS). <br> 覆盖边界与加固清单。 |
 | [`vps/setup.md`](vps/setup.md) | VPS build, hardening, Elastic IP change checklist. <br> VPS 搭建、加固、换 IP 清单。 |
 
 All Chinese docs assume the reader already has a working SSH key and a VPS. / 中文文档默认你已有可用的 SSH 密钥与 VPS。
@@ -188,12 +200,18 @@ All Chinese docs assume the reader already has a working SSH key and a VPS. / �
 - **No credentials are committed.** The sing-box example has an empty password; `.gitignore` excludes `*.pem`, `profiles/`, and local config.
 - **The VPS IP is a placeholder.** Replace `YOUR_VPS_IP` locally; do not commit it if you intend to keep the host private.
 - **This is not a guarantee against platform risk controls.** It is a consistency and reliability tool. Datacenter IPs are still datacenter IPs.
-- **WebRTC** may still reveal another exit if you run a TUN-based client for other traffic — see the limitations section in `docs/architecture.md`.
+- **Scope is per process, not per machine.** Only the `claude` process (or the Chrome instance) this launcher starts is covered. IDE extensions, other terminals, and proxy-unaware child processes can still go direct.
+- **WebRTC bypasses HTTP proxies.** The example config sets `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`; verify with `chrome://webrtc-internals`. A `/32` route does **not** fix UDP.
+- **Local port 7891 has no authentication.** Any local process can borrow your egress.
 
 - **不含任何凭据**，示例配置里没有密码，`.gitignore` 排除了密钥与本地配置。
 - **VPS IP 是占位符**，真实值不要提交。
 - **本项目不承诺绕过任何风控**，它解决的是"出口一致性与可靠性"。
-- 若本机同时跑 TUN 类客户端，WebRTC 仍可能暴露另一个出口，详见 `docs/architecture.md` 的限制章节。
+- **覆盖范围是进程级，不是整机**：只有本次启动的 `claude` 或 Chrome 实例被覆盖；IDE 插件、其它终端、不认代理的子进程仍可能直连。
+- **WebRTC 绕过 HTTP 代理**：示例配置已加 `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`，用 `chrome://webrtc-internals` 自查；`/32` 路由**不能**解决 UDP。
+- **本地 7891 无认证**：本机任何进程都能借用你的出口。
+
+完整清单见 [`docs/security.md`](docs/security.md)。
 
 ---
 

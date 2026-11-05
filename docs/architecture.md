@@ -93,7 +93,7 @@
        -o TCPKeepAlive=yes claude-vps
    ```
    随后以 500 ms 间隔复查 20 次（最长 10 秒）。仍不监听则中止。
-3. **校验出口 IP**。经代理请求 `https://ipwho.is/`，失败再退回 `https://api.ipify.org`，两次都设 15 秒超时。取到的 IP 必须等于 `-ExpectedIp`，否则中止；未提供 `-ExpectedIp` 时只告警，不阻断。
+3. **校验出口 IP**。经代理请求 `https://ipwho.is/`，失败再退回 `https://api.ipify.org`，两次都设 15 秒超时。取到的 IP 必须等于 `-ExpectedIp`，否则中止。`-ExpectedIp` 未通过参数给出时读取 `$env:CLAUDE_EGRESS_EXPECTED_IP`；两者都没有时，除 `-CheckOnly` 外**直接拒绝启动**。四个 `curl` 调用都带 `--noproxy ""`，防止环境里的 `NO_PROXY` 让 curl 跳过 `-x` 去测直连路径。
 4. **校验 API 可达**。经代理请求 `https://api.anthropic.com/v1/messages`，20 秒超时。判据是"拿到任意 HTTP 状态码"——401/403/404 都算通，只有 `000` 或 curl 非零退出才中止。`-Web` 模式额外检查 `https://claude.ai/`（25 秒超时）。
 5. **注入环境变量**。设置 `HTTPS_PROXY`/`HTTP_PROXY` 为 `http://127.0.0.1:7891`，`NO_PROXY` 为回环地址，然后前台启动 `claude`。
 6. **实际转发**。Claude Code 发出 `CONNECT api.anthropic.com:443` 到 `127.0.0.1:7891` → ssh 客户端经加密连接送到 VPS → sshd 在本机回环连 `127.0.0.1:7890` → sing-box `mixed` inbound 接受 → `direct` outbound 发起真正的 TLS 连接。回包沿原路返回。
@@ -105,7 +105,7 @@
 1. 同一个编排脚本先跑完上述第 1–4 步（`-Web` 时含 claude.ai 检查）。
 2. 调用 `launch.py --config config.local.json --profile claude`。
 3. `launch.py` 读取配置，组装 `launch_persistent_context` 参数：`channel="chrome"`、`user_data_dir=profiles/claude`、`proxy.server` 固定为 `http://127.0.0.1:7891`。
-4. **启动前探测**。解析 `proxy.server` 的 host/port，做一次 5 秒超时的 `socket.create_connection`；失败打印 `[fatal]` 并 `sys.exit(2)`。这一步发生在 Chrome 进程创建之前，因此不会出现"浏览器起来了但没代理"的中间态。
+4. **启动前探测**。解析 `proxy.server` 的 host/port，做一次 5 秒超时的 `socket.create_connection`；再**经该代理**请求 IP 回显服务，比对 `expected_ip`。任一失败打印 `[fatal]` 并 `sys.exit(2)`。这两步都发生在 Chrome 进程创建之前，因此不会出现"浏览器起来了但没代理/出口不对"的中间态。
 5. **启动浏览器**。持久化上下文复用已有 profile（cookie、登录态、扩展），`locale` 与 `timezone_id` 由配置覆盖。
 6. **导航**。默认打开 `https://claude.ai/`，`domcontentloaded` 超时 60 秒。超时只告警、不关窗——机房 IP 上的 Cloudflare 挑战通常要 30–90 秒。
 
@@ -156,11 +156,14 @@
 | # | 检查 | 判据 | 失败动作 |
 |---|---|---|---|
 | 1 | 本地端口 | 尝试拉起后 `127.0.0.1:7891` 处于 Listen | `throw`，不启动任何东西 |
-| 2 | 出口 IP | 经代理测得的 IP 等于 `-ExpectedIp` | `throw` |
+| 1b | **端口属主** | 监听进程是 `ssh.exe`，且命令行含期望的 `-L` 转发与主机别名 | `throw`（识别不到属主时只告警） |
+| 2 | 出口 IP | 经代理测得的 IP 等于 `-ExpectedIp`；未钉扎则拒绝启动 | `throw` |
 | 3 | API 可达 | `api.anthropic.com/v1/messages` 返回任意 HTTP 状态 | `000` 或 curl 失败则 `throw` |
-| 4 | 浏览器代理 | 启动前对 `proxy.host:port` 做 TCP 探测 | `sys.exit(2)` |
+| 4 | 浏览器侧 | 端口可达 **且** 经代理测得的出口 IP 等于 `expected_ip` | `sys.exit(2)` |
 
 四道闸的共同点是：**没有"继续但降级"的分支**。任何一道不过，进程就结束。
+
+闸 1b 存在的理由：只判断"端口有人监听"会把任何本地代理误当成隧道——例如把另一个客户端的混合端口设成 7891，脚本就会跳过建隧道直接使用它。出口 IP 校验能兜住多数情况，但它无法识破一个会对 IP 回显服务特判的本地代理。
 
 ### 6.2 典型失败模式
 
@@ -170,7 +173,7 @@
 | 出口 IP 与期望不符 | 隧道没起作用、流量走了别的代理 | 闸 2 中止 |
 | API 检查返回 `000` | 代理链路断、DNS 失败、TLS 被拦 | 闸 3 中止 |
 | 浏览器窗口没出现，退出码 2 | `7891` 未监听 | 闸 4 中止 |
-| 用着用着端口消失 | sshd 静默掉线、睡眠、NAT 超时 | 看护进程 20 秒内重建；期间新启动会被拒 |
+| 用着用着端口消失 | sshd 静默掉线、睡眠、NAT 超时 | 看护进程最多 20 秒发现，再加最多 10 秒重建等待（最坏约 30 秒）；期间新启动会被拒 |
 | SSH 握手超时且出口 IP 变成家宽 | TUN 客户端劫持了到 VPS 的连接 | 需要 `/32` 路由，见第 8 节 |
 | 改完 BBR 仍然很慢 | 老连接仍用 cubic | 重建隧道 |
 
@@ -182,7 +185,7 @@ PAC 的常见写法是 `return "PROXY 127.0.0.1:7891; DIRECT"`。分号后面的
 
 ## 7. 已知限制
 
-- **UDP/WebRTC 仍可能泄漏另一个出口**。若本机为其他流量开着 TUN，且没有为 VPS 公网 IP 加 `/32` 直出路由，浏览器的 UDP 流量可能绕过隧道，暴露家宽或其他出口。HTTPS 走代理不代表所有传输层都走代理。
+- **WebRTC 绕过 HTTP 代理**。`--proxy-server` 只代理 TCP，`RTCPeerConnection` 会直接向 STUN 服务器发 UDP，暴露本机真实出口。示例配置用 `--force-webrtc-ip-handling-policy=disable_non_proxied_udp` 缓解，可用 `chrome://webrtc-internals` 验证。给 VPS IP 加 `/32` 路由**不能**解决这个问题——它只固定"到 VPS 的 SSH 外层连接"，与发往任意 STUN 服务器的 UDP 无关。
 - **机房 IP 就是机房 IP**。能保证的是一致性与可靠性，不承诺绕过任何风控。claude.ai 的 Cloudflare 挑战在机房 IP 上通常需要 30–90 秒才放行，这是预期行为，不是故障。
 - **单点**。VPS 挂了就没有出口，CLI 与网页一起不可用。这是有意的设计，不是待修的 bug——引入备用出口就会引入"当前到底走哪条"的不确定性。
 - **并发与 UDP 受限**。单条 SSH 隧道 + `-L` 转发不承载 UDP，高并发场景下吞吐会受队头阻塞影响。
@@ -231,7 +234,7 @@ Host claude-vps
 | 字段 | 示例 | 作用 |
 |---|---|---|
 | `proxy.server` | `http://127.0.0.1:7891` | 固定代理，无回退 |
-| `fail_closed` | `true` | 启动前探测代理，失败退出 2 |
+| `fail_closed` | `true` | 代理不可达或 `expected_ip` 为空时退出 2 |
 | `channel` | `chrome` | 使用本机 Chrome |
 | `user_data_dir` | `null` → `profiles/<profile>` | 持久化 profile |
 | `timezone_id` | 按出口地区填写 | CDP 层覆盖 |

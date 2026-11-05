@@ -2,7 +2,9 @@
 
 目标：一台只做出口的 Linux 机器 —— 对本机而言，它只是一个 SSH 端口 + 一个绑定在回环上的代理端口。
 
-> 本文以 Amazon Linux 2023 为例（`ec2-user`、`dnf`）。Debian/Ubuntu 把 `dnf` 换成 `apt` 即可，systemd 部分完全一致。
+> 本文以 Amazon Linux 2023 为例（`ec2-user`、`dnf`）。Debian/Ubuntu 把 `dnf` 换成 `apt` 即可；systemd 逻辑一致，但重启 SSH 的单元名不同（Debian/Ubuntu 是 `ssh`，AL2023 是 `sshd`）。
+>
+> **以下命令除特别说明外，都在仓库根目录执行**（即 `vps/setup.md` 的上一级）。
 
 ---
 
@@ -45,7 +47,7 @@ sing-box version
 ```bash
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin sing-box
 sudo mkdir -p /etc/sing-box
-sudo chown -R root:root /etc/sing-box
+sudo chown root:sing-box /etc/sing-box
 sudo chmod 0750 /etc/sing-box
 ```
 
@@ -58,8 +60,12 @@ Debian/Ubuntu 也可以直接用官方 APT 仓库（见官方安装文档）；A
 复制仓库里的样例：
 
 ```bash
-sudo cp sing-box.example.json /etc/sing-box/config.json
-sudo sing-box check -c /etc/sing-box/config.json
+sudo cp vps/sing-box.example.json /etc/sing-box/config.json
+sudo chown root:sing-box /etc/sing-box /etc/sing-box/config.json
+sudo chmod 0750 /etc/sing-box
+sudo chmod 0640 /etc/sing-box/config.json
+# 以服务用户校验，权限问题会在这里暴露，而不是等 systemd 启动失败
+sudo -u sing-box /usr/local/bin/sing-box check -c /etc/sing-box/config.json
 ```
 
 关键点只有两条：
@@ -84,7 +90,14 @@ User=sing-box
 ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
 Restart=on-failure
 RestartSec=5
-LimitNOFILE=infinity
+LimitNOFILE=65535
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6
 
 [Install]
 WantedBy=multi-user.target
@@ -107,7 +120,7 @@ ss -lntp | grep 7890        # 期望：127.0.0.1:7890，而不是 0.0.0.0:7890
 
 ```bash
 sudo modprobe tcp_bbr
-sudo cp sysctl-bbr.conf /etc/sysctl.d/99-bbr.conf
+sudo cp vps/sysctl-bbr.conf /etc/sysctl.d/99-bbr.conf
 echo 'tcp_bbr' | sudo tee /etc/modules-load.d/tcp_bbr.conf
 sudo sysctl --system
 ```
@@ -120,7 +133,7 @@ sysctl net.core.default_qdisc            # net.core.default_qdisc = fq
 lsmod | grep bbr
 ```
 
-> **改完必须重建 SSH 隧道。** 拥塞控制算法在连接建立时固定，已经连着的会话仍用旧算法。这一点在第 6 节验证时会直接体现出来——旧隧道没变快，新隧道变快了。
+> **改完必须重建 SSH 隧道。** 拥塞控制算法在连接建立时固定，已经连着的会话仍用旧算法。这一点在第 8 节验收时会直接体现出来——旧隧道没变快，新隧道变快了。
 
 ---
 
@@ -143,8 +156,8 @@ Host claude-vps
 测试转发是否真的工作（这一步比 `ssh` 是否登录成功更有意义）：
 
 ```bash
-ssh -N -L 127.0.0.1:7891:127.0.0.1:7890 claude-vps
-curl -s -x http://127.0.0.1:7891 https://ipwho.is/
+ssh -f -N -L 127.0.0.1:7891:127.0.0.1:7890 claude-vps   # -f: 认证后转后台，不阻塞
+curl.exe -s --noproxy "" -x http://127.0.0.1:7891 https://ipwho.is/
 ```
 
 返回的 `ip` 必须等于 `YOUR_VPS_IP`。不等就说明流量没走隧道（常见原因：本机还有 TUN 类客户端劫持了到 VPS 的连接，见 [`../docs/troubleshooting.md`](../docs/troubleshooting.md) 第 5 条）。
@@ -153,12 +166,13 @@ curl -s -x http://127.0.0.1:7891 https://ipwho.is/
 
 ## 6. 换 Elastic IP 时要同步的四件事
 
-换 IP 是排障手段之一（历史信誉由 IP 承载），但它是一个**跨三处**的操作，漏一处就会以"隧道通了但出口校验失败"的形式暴露：
+换 IP 是排障手段之一（历史信誉由 IP 承载），但它是一个**跨四处**的操作，漏一处就会以"隧道通了但出口校验失败"的形式暴露：
 
 1. 云端把 EIP 重新关联到实例（关联后旧的公网 IPv4 会被释放）。
 2. 本机 `~/.ssh/config` 的 `HostName`。
 3. 启动脚本里的 `-ExpectedIp`（这是 fail-closed 的锚点）。
 4. 如果给 VPS 加了 `/32` 主机路由绕开本机 TUN，那条路由也要改成新 IP。
+5. `known_hosts`：旧 IP 可能被分配给别的 AWS 客户，换 IP 后先 `ssh-keygen -R <旧IP>`，再通过控制台核对新主机指纹。
 
 另外：
 
@@ -169,16 +183,31 @@ curl -s -x http://127.0.0.1:7891 https://ipwho.is/
 
 ## 7. 加固
 
-最低限度：
+最低限度用 **drop-in** 写，而不是改主配置——cloud-init 的 `50-cloud-init.conf` 可能覆盖主文件里的同名项：
 
 ```bash
-# /etc/ssh/sshd_config
+sudo tee /etc/ssh/sshd_config.d/99-egress.conf >/dev/null <<'EOF'
 PasswordAuthentication no
+KbdInteractiveAuthentication no
 PermitRootLogin no
+PermitEmptyPasswords no
+AuthenticationMethods publickey
+AllowTcpForwarding local
+PermitOpen 127.0.0.1:7890
+MaxAuthTries 3
+LoginGraceTime 20
+EOF
 ```
 
+`PermitOpen` 很关键：即使密钥泄露，拿到它的人也只能把转发指向 VPS 的 7890，不能拿这台机器当通用跳板。
+
+验证**生效值**（不是文件内容）：
+
 ```bash
-sudo systemctl restart sshd
+sudo sshd -t
+sudo sshd -T | grep -Ei 'passwordauthentication|permitrootlogin|permitopen|allowtcpforwarding'
+sudo systemctl restart ssh    # Debian/Ubuntu
+sudo systemctl restart sshd   # Amazon Linux 2023
 ```
 
 - 安全组只留 22，且来源尽量收窄。

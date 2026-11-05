@@ -5,19 +5,23 @@
   "slow_mo": 0,
   "locale": "en-US",
   "timezone_id": "America/New_York",
+  "chromium_sandbox": true,
   "browser_args": [
     "--disable-background-networking",
     "--disable-background-timer-throttling",
     "--disable-backgrounding-occluded-windows",
     "--disable-renderer-backgrounding",
-    "--disable-features=CalculateNativeWinOcclusion"
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    "--dns-prefetch-disable"
   ],
   "user_data_dir": null,
   "start_url": "https://claude.ai/",
   "fail_closed": true,
+  "expected_ip": "",
   "proxy": {
     "server": "http://127.0.0.1:7891",
     "username": "",
-    "password": ""
+    "password": "",
+    "bypass": "localhost,127.0.0.1,::1"
   }
 }
