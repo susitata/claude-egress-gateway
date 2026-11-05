@@ -1,0 +1,4 @@
+# Tested with patchright 1.64.4 / Python 3.12.
+# Patchright is a patched Playwright build: no CDP Runtime.enable leak,
+# no navigator.webdriver, no automation-injected globals.
+patchright==1.64.4

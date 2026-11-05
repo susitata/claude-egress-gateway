@@ -1,0 +1,23 @@
+{
+  "channel": "chrome",
+  "headless": false,
+  "no_viewport": true,
+  "slow_mo": 0,
+  "locale": "en-US",
+  "timezone_id": "America/New_York",
+  "browser_args": [
+    "--disable-background-networking",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-features=CalculateNativeWinOcclusion"
+  ],
+  "user_data_dir": null,
+  "start_url": "https://claude.ai/",
+  "fail_closed": true,
+  "proxy": {
+    "server": "http://127.0.0.1:7891",
+    "username": "",
+    "password": ""
+  }
+}

@@ -1,0 +1,33 @@
+# --- secrets / credentials -------------------------------------------------
+*.pem
+*.key
+*.ppk
+id_rsa*
+.env
+.env.*
+
+# --- local config (real IPs, real ports) -----------------------------------
+browser/config.local.json
+config/*.local.json
+*.local.json
+
+# --- runtime state ---------------------------------------------------------
+profiles/
+output/
+screenshots/
+*.png
+!docs/**/*.png
+
+# --- python ----------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# --- editors / os ----------------------------------------------------------
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
