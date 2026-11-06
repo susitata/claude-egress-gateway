@@ -6,9 +6,9 @@
 
 ### 1.1 目标
 
-1. **出口固定**：Claude Code（CLI）与 claude.ai（浏览器）的全部流量，最终都从同一台 VPS 的同一个公网 IPv4 出去。
+1. **出口固定**：Claude Code（CLI）与 claude.ai（浏览器）经代理的 TCP 流量，最终都从同一台 VPS 的同一个公网 IPv4 出去。UDP/ICMP 与 IPv6 不在覆盖范围内。
 2. **可校验**：每次启动都实际测量出口 IP，并与期望值比对，而不是"相信配置是对的"。
-3. **fail-closed**：链路任何一环不成立，启动直接失败。不存在"代理不通就直连"的回退路径。
+3. **fail-closed（默认）**：链路任何一环不成立，启动直接失败。CLI 不存在"代理不通就直连"的回退路径；浏览器侧只有显式设置 `fail_closed: false` 才会关闭代理检查。
 4. **暴露面最小**：VPS 上不开放任何代理端口，本机不安装额外的代理协议客户端。
 
 ### 1.2 硬约束
@@ -17,7 +17,7 @@
 |---|---|---|
 | 本地代理入口 | `127.0.0.1:7891` | 只监听回环，局域网不可达 |
 | VPS 入口 | 仅 TCP `22` | 安全组不放行任何代理端口 |
-| VPS 代理 | sing-box `1.14.x`，`mixed` inbound 监听 `127.0.0.1:7890` | 只被 sshd 的本地转发访问 |
+| VPS 代理 | sing-box（示例按 `1.14.x` 语法编写，规则使用 `action: "reject"` / `"resolve"`），`mixed` inbound 监听 `127.0.0.1:7890` | 只被 sshd 的本地转发访问 |
 | VPS 出口 | `direct` outbound | 不做二次代理、不做分流 |
 | 客户端 | Windows + OpenSSH | 隧道命令按 Windows 写法给出，Linux/macOS 可平移 |
 | 浏览器 | Patchright + 本机 Chrome | 需要本地已安装 Chrome |
@@ -50,7 +50,7 @@
 |   sshd :22                                                                   |
 |      |  端口转发：127.0.0.1:7890 (VPS 侧回环)                                 |
 |      v                                                                       |
-|   sing-box 1.14.x   mixed inbound 127.0.0.1:7890                             |
+|   sing-box (1.14.x syntax)  mixed inbound 127.0.0.1:7890                       |
 |                     outbound: direct                                         |
 |   kernel: tcp_congestion_control=bbr, default_qdisc=fq                       |
 +-----------------------------|------------------------------------------------+
@@ -69,9 +69,9 @@
 | 组件 | 位置 | 职责 | 失败时 |
 |---|---|---|---|
 | `claude` | 本机 | Claude Code CLI，读取 `HTTPS_PROXY` | 代理不可用则请求失败 |
-| `browser/launch.py` | 本机 | 用 Patchright 启动真实 Chrome，固定 `proxy.server`，持久化 profile | 代理探测失败 `sys.exit(2)` |
+| `browser/launch.py` | 本机 | 用 Patchright 启动真实 Chrome，使用编排脚本传入的 `proxy.server`，持久化 profile | 代理探测失败 `sys.exit(2)` |
 | `scripts/start-claude-egress.ps1` | 本机 | 编排：起隧道、校验端口/出口 IP/API、注入环境变量、拉起 CLI 或浏览器 | 任一校验不过即 `throw`，不降级 |
-| `scripts/watch-tunnel.ps1` | 本机 | 每 20 秒检查端口，掉了就重建隧道 | 重建失败则下一轮重试 |
+| `scripts/watch-tunnel.ps1` | 本机 | 每 20 秒检查端口与属主（绝对路径 `ssh.exe`、完整 `-L` 值、末尾主机别名），掉了就重建隧道 | 重建失败则下一轮重试；非期望的监听者只告警、不触碰 |
 | `ssh.exe` | 本机 | `-N -L` 本地转发，把 `127.0.0.1:7891` 映射到 VPS 的 `127.0.0.1:7890` | `ExitOnForwardFailure=yes` 让它直接退出而不是半可用 |
 | `sshd` | VPS | 接受 SSH、执行本地转发 | 隧道断开，端口消失 |
 | `sing-box` | VPS | `mixed` inbound 接收 HTTP/SOCKS，`direct` 出站 | 端口不监听，转发连接被拒 |
@@ -84,16 +84,17 @@
 
 以 `scripts/start-claude-egress.ps1 -SshHost claude-vps -ExpectedIp YOUR_VPS_IP -Claude` 为例。
 
-1. **检查本地端口**。`Get-NetTCPConnection -LocalPort 7891 -State Listen` 判断 `7891` 是否已监听。
+1. **检查本地端口**。`Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort 7891 -State Listen` 判断 `7891` 是否只在本机回环监听。
 2. **必要时起隧道**。未监听则后台启动：
    ```powershell
    ssh -N -L 127.0.0.1:7891:127.0.0.1:7890 `
        -o BatchMode=yes -o ExitOnForwardFailure=yes `
+       -o ConnectTimeout=10 `
        -o ServerAliveInterval=15 -o ServerAliveCountMax=4 `
        -o TCPKeepAlive=yes claude-vps
    ```
    随后以 500 ms 间隔复查 20 次（最长 10 秒）。仍不监听则中止。
-3. **校验出口 IP**。经代理请求 `https://ipwho.is/`，失败再退回 `https://api.ipify.org`，两次都设 15 秒超时。取到的 IP 必须等于 `-ExpectedIp`，否则中止。`-ExpectedIp` 未通过参数给出时读取 `$env:CLAUDE_EGRESS_EXPECTED_IP`；两者都没有时，除 `-CheckOnly` 外**直接拒绝启动**。四个 `curl` 调用都带 `--noproxy ""`，防止环境里的 `NO_PROXY` 让 curl 跳过 `-x` 去测直连路径。
+3. **校验出口 IP**。经代理请求 `https://ipwho.is/`，失败再退回 `https://api.ipify.org`，两次都设 15 秒超时。取到的 IP 必须等于 `-ExpectedIp`，否则中止。`-ExpectedIp` 未通过参数给出时读取 `$env:CLAUDE_EGRESS_EXPECTED_IP`；两者都没有时最终拒绝启动（`-CheckOnly` 需显式 `-AllowUnpinned` 才放行）。四个 `curl` 调用都写成 `--noproxy=` 和 `--max-time=N`：Windows PowerShell 5.1 会丢掉空字符串参数，`--noproxy ""` 实际会变成 `--noproxy --max-time 15`，超时被吞掉、`15` 被当成 URL；等号形式没有这个问题，同时仍能阻止环境里的 `NO_PROXY` 让 curl 跳过 `-x` 去测直连路径。
 4. **校验 API 可达**。经代理请求 `https://api.anthropic.com/v1/messages`，20 秒超时。判据是"拿到任意 HTTP 状态码"——401/403/404 都算通，只有 `000` 或 curl 非零退出才中止。`-Web` 模式额外检查 `https://claude.ai/`（25 秒超时）。
 5. **注入环境变量**。设置 `HTTPS_PROXY`/`HTTP_PROXY` 为 `http://127.0.0.1:7891`，`NO_PROXY` 为回环地址，然后前台启动 `claude`。
 6. **实际转发**。Claude Code 发出 `CONNECT api.anthropic.com:443` 到 `127.0.0.1:7891` → ssh 客户端经加密连接送到 VPS → sshd 在本机回环连 `127.0.0.1:7890` → sing-box `mixed` inbound 接受 → `direct` outbound 发起真正的 TLS 连接。回包沿原路返回。
@@ -103,13 +104,14 @@
 ### 4.2 浏览器路径
 
 1. 同一个编排脚本先跑完上述第 1–4 步（`-Web` 时含 claude.ai 检查）。
-2. 调用 `launch.py --config config.local.json --profile claude`。
-3. `launch.py` 读取配置，组装 `launch_persistent_context` 参数：`channel="chrome"`、`user_data_dir=profiles/claude`、`proxy.server` 固定为 `http://127.0.0.1:7891`。
-4. **启动前探测**。解析 `proxy.server` 的 host/port，做一次 5 秒超时的 `socket.create_connection`；再**经该代理**请求 IP 回显服务，比对 `expected_ip`。任一失败打印 `[fatal]` 并 `sys.exit(2)`。这两步都发生在 Chrome 进程创建之前，因此不会出现"浏览器起来了但没代理/出口不对"的中间态。
-5. **启动浏览器**。持久化上下文复用已有 profile（cookie、登录态、扩展），`locale` 与 `timezone_id` 由配置覆盖。
-6. **导航**。默认打开 `https://claude.ai/`，`domcontentloaded` 超时 60 秒。超时只告警、不关窗——机房 IP 上的 Cloudflare 挑战通常要 30–90 秒。
+2. 调用 `launch.py --config config.local.json --profile claude --expected-ip <IP> --proxy-server http://127.0.0.1:<LocalPort>`。
+3. `launch.py` 读取配置，组装 `launch_persistent_context` 参数：`channel="chrome"`、`user_data_dir=<repo>/profiles/claude`（默认）、`proxy.server` 由 `--proxy-server` 覆盖（示例配置为 `http://127.0.0.1:7891`）。
+4. **启动前探测**。解析 `proxy.server` 的 host/port，做一次 5 秒超时的 `socket.create_connection`；再**经该代理**请求 IP 回显服务，比对 `expected_ip`。任一失败打印 `[fatal]` 并 `sys.exit(2)`。这两步都发生在 Chrome 进程创建之前，配置错误不会拖到浏览器起来之后才暴露。
+5. **启动后用 Chrome 再测一次**。企业策略（managed `ProxySettings`）或代理扩展的优先级高于 `--proxy-server`，仅用 urllib 预检看不到这种覆盖。`launch.py` 在 `launch_persistent_context` 之后新建一个页面，让 **Chrome 自己**访问 IP 回显服务；结果不等于 `expected_ip` 就关闭并 `sys.exit(2)`。这一步同时能兜住 `proxy.bypass` 配置错误。
+6. **启动浏览器**。持久化上下文复用已有 profile 的 cookie 与登录态；扩展默认被 Playwright 的 `--disable-extensions` 禁用，需要额外处理默认参数才会加载。`locale` 与 `timezone_id` 由配置覆盖。
+7. **导航**。默认打开 `https://claude.ai/`，`domcontentloaded` 超时 60 秒。超时只告警、不关窗——机房 IP 上的 Cloudflare 挑战通常要 30–90 秒。
 
-浏览器不使用 PAC，也没有系统代理作为后备。Chrome 只会连 `127.0.0.1:7891`；该端口不通时页面直接报错。
+浏览器不使用 PAC，也没有系统代理作为后备。代理路径上的 HTTPS 请求只会连到 `proxy.server`；该端口不通时页面直接报错。回环直连、DoH 与 WebRTC UDP 是例外，见 [`security.md`](security.md) 第 3、4、5 节。
 
 ## 5. 关键取舍
 
@@ -135,7 +137,7 @@
 
 - **选择**：在启动参数里显式指定，使其与出口地区自洽。
 - **理由**：时区、语言、出口 IP 三者不一致本身就是异常信号；显式覆盖至少保证浏览器层自洽。
-- **边界**：这属于 CDP/浏览器层覆盖，只改变页面可见的 `Intl` 与 `Date` 行为，**不改变操作系统时区**，也不影响浏览器之外的任何进程。
+- **边界**：这属于 CDP/浏览器层覆盖，会改变页面可见的 `Intl`/`Date`、`navigator.language(s)` 和 `Accept-Language`，**不改变操作系统时区**，也不影响浏览器之外的任何进程。
 
 ### 5.5 隧道保活 + 20 秒看护进程
 
@@ -151,17 +153,17 @@
 
 ## 6. 失败模式与 fail-closed 设计
 
-### 6.1 四道闸
+### 6.1 五道检查
 
 | # | 检查 | 判据 | 失败动作 |
 |---|---|---|---|
 | 1 | 本地端口 | 尝试拉起后 `127.0.0.1:7891` 处于 Listen | `throw`，不启动任何东西 |
-| 1b | **端口属主** | 监听进程是 `ssh.exe`，且命令行含期望的 `-L` 转发与主机别名 | `throw`（识别不到属主时只告警） |
-| 2 | 出口 IP | 经代理测得的 IP 等于 `-ExpectedIp`；未钉扎则拒绝启动 | `throw` |
+| 1b | **端口属主** | 监听进程是绝对路径的系统 `ssh.exe`，`-L` 值与期望转发完全一致，且主机别名是最后一个参数 | `throw`；识别不到属主也 `throw`，除非显式 `-AllowUnknownOwner` |
+| 2 | 出口 IP | 经代理测得的 IP 等于 `-ExpectedIp`；未钉扎则拒绝启动 | `throw`（`-CheckOnly` + `-AllowUnpinned` 除外） |
 | 3 | API 可达 | `api.anthropic.com/v1/messages` 返回任意 HTTP 状态 | `000` 或 curl 失败则 `throw` |
-| 4 | 浏览器侧 | 端口可达 **且** 经代理测得的出口 IP 等于 `expected_ip` | `sys.exit(2)` |
+| 4 | 浏览器侧（`fail_closed: true`） | 端口可达 **且** 经代理测得的出口 IP 等于 `expected_ip`；Chrome 启动后再由 Chrome 自己实测一次 | `sys.exit(2)` |
 
-四道闸的共同点是：**没有"继续但降级"的分支**。任何一道不过，进程就结束。
+这五道检查的共同点是：默认**没有"继续但降级"的分支**。任何一道不过，进程就结束；两个 `-Allow*` 开关和浏览器的 `fail_closed: false` 是显式、可审计的例外，不是默认行为。
 
 闸 1b 存在的理由：只判断"端口有人监听"会把任何本地代理误当成隧道——例如把另一个客户端的混合端口设成 7891，脚本就会跳过建隧道直接使用它。出口 IP 校验能兜住多数情况，但它无法识破一个会对 IP 回显服务特判的本地代理。
 
@@ -172,8 +174,8 @@
 | 启动即报端口未监听 | VPS 不可达、sshd 拒绝、转发失败 | 闸 1 中止 |
 | 出口 IP 与期望不符 | 隧道没起作用、流量走了别的代理 | 闸 2 中止 |
 | API 检查返回 `000` | 代理链路断、DNS 失败、TLS 被拦 | 闸 3 中止 |
-| 浏览器窗口没出现，退出码 2 | `7891` 未监听 | 闸 4 中止 |
-| 用着用着端口消失 | sshd 静默掉线、睡眠、NAT 超时 | 看护进程最多 20 秒发现，再加最多 10 秒重建等待（最坏约 30 秒）；期间新启动会被拒 |
+| 浏览器窗口没出现，退出码 2 | 先看 `[fatal]` 行：代理不可达、`expected_ip` 为空或不匹配都会退出 2；`browser_args`/配置错误通常是退出 1 | 闸 4 中止 |
+| 用着用着端口消失 | sshd 静默掉线、睡眠、NAT 超时 | ssh 进程已退出时：最多 20 秒发现 + 10 秒重建等待；TCP 半开但进程还活着时，要先等 `ServerAliveInterval=15 × CountMax=4`（约 60 秒）让 ssh 退出，最坏约 90 秒。期间新启动会被拒 |
 | SSH 握手超时且出口 IP 变成家宽 | TUN 客户端劫持了到 VPS 的连接 | 需要 `/32` 路由，见第 8 节 |
 | 改完 BBR 仍然很慢 | 老连接仍用 cubic | 重建隧道 |
 
@@ -186,7 +188,7 @@ PAC 的常见写法是 `return "PROXY 127.0.0.1:7891; DIRECT"`。分号后面的
 ## 7. 已知限制
 
 - **WebRTC 绕过 HTTP 代理**。`--proxy-server` 只代理 TCP，`RTCPeerConnection` 会直接向 STUN 服务器发 UDP，暴露本机真实出口。浏览器层的 `--force-webrtc-ip-handling-policy` 在新版 Chrome 上实测无效，只有网络层（TUN / 防火墙阻断 UDP）能解决。给 VPS IP 加 `/32` 路由同样**不能**解决这个问题——它只固定"到 VPS 的 SSH 外层连接"。
-- **机房 IP 就是机房 IP**。能保证的是一致性与可靠性，不承诺绕过任何风控。claude.ai 的 Cloudflare 挑战在机房 IP 上通常需要 30–90 秒才放行，这是预期行为，不是故障。
+- **机房 IP 的信誉不会因为这条隧道而改变**。能保证的是一致性与可靠性，不承诺绕过任何风控。claude.ai 的 Cloudflare 挑战在机房 IP 上通常需要 30–90 秒才放行，这是预期行为，不是故障。
 - **单点**。VPS 挂了就没有出口，CLI 与网页一起不可用。这是有意的设计，不是待修的 bug——引入备用出口就会引入"当前到底走哪条"的不确定性。
 - **并发与 UDP 受限**。单条 SSH 隧道 + `-L` 转发不承载 UDP，高并发场景下吞吐会受队头阻塞影响。
 - **地址计费**。VPS 公网 IPv4 自 2024-02-01 起按 `$0.005/IP/小时` 计费（约 `$3.65/月`）；Elastic IP 即使未绑定实例也会计费，销毁实例前记得释放。
@@ -209,7 +211,7 @@ PAC 的常见写法是 `return "PROXY 127.0.0.1:7891; DIRECT"`。分号后面的
 ```
 Host claude-vps
     HostName YOUR_VPS_IP
-    User <your-user>
+    User ec2-user
     IdentityFile C:/Users/<you>/.ssh/your-key.pem
     IdentitiesOnly yes
     ServerAliveInterval 15
@@ -233,10 +235,10 @@ Host claude-vps
 
 | 字段 | 示例 | 作用 |
 |---|---|---|
-| `proxy.server` | `http://127.0.0.1:7891` | 固定代理，无回退 |
+| `proxy.server` | `http://127.0.0.1:7891` | 单一代理，无回退；`-Web` 时由 `--proxy-server` 覆盖为实际校验的端口 |
 | `fail_closed` | `true` | 代理不可达或 `expected_ip` 为空时退出 2 |
 | `channel` | `chrome` | 使用本机 Chrome |
-| `user_data_dir` | `null` → `profiles/<profile>` | 持久化 profile |
+| `user_data_dir` | `null` → `<repo>/profiles/<profile>` | 持久化 profile；相对路径按 `browser/` 解析 |
 | `timezone_id` | 按出口地区填写 | CDP 层覆盖 |
 | `locale` | 按出口地区填写 | CDP 层覆盖 |
 | `start_url` | `https://claude.ai/` | 首次导航 |
@@ -245,18 +247,37 @@ Host claude-vps
 
 ### 8.5 VPS 侧
 
-sing-box 配置节选（示意，字段以实际版本为准）：
+sing-box 配置节选（示意；示例按 1.14.x 语法编写，部署前请先跑一次 `sing-box check`）：
 
 ```json
 {
+  "dns": {
+    "servers": [
+      { "type": "tls", "tag": "public", "server": "1.1.1.1", "server_port": 853,
+        "tls": { "server_name": "cloudflare-dns.com" }, "detour": "direct" }
+    ]
+  },
   "inbounds": [
     { "type": "mixed", "listen": "127.0.0.1", "listen_port": 7890 }
   ],
   "outbounds": [
-    { "type": "direct" }
-  ]
+    { "type": "direct", "tag": "direct" }
+  ],
+  "route": {
+    "rules": [
+      { "action": "resolve", "server": "public", "strategy": "prefer_ipv4" },
+      { "ip_is_private": true, "action": "reject" },
+      { "ip_cidr": ["0.0.0.0/8", "127.0.0.0/8", "100.64.0.0/10", "169.254.0.0/16",
+                    "192.0.0.0/24", "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4",
+                    "::1/128", "fe80::/10", "fc00::/7", "::ffff:0:0/96"], "action": "reject" },
+      { "domain_suffix": ["localhost", "local", "localdomain", "localtest.me", "nip.io",
+                          "sslip.io", "xip.io", "internal", "instance-data", "svc"], "action": "reject" }
+    ]
+  }
 }
 ```
+
+`action: "resolve"` 必须排在 IP 规则之前：没有它，域名形式的目标不会产生 `DestinationAddresses`，`ip_is_private` / `ip_cidr` 只对 IP 字面量生效。解析后仍建议在 VPS 防火墙上按 sing-box 用户的出站目标兜底，见 [`security.md`](security.md) 第 7 节；防火墙不依赖 sing-box 的解析路径，是第二道独立防线。
 
 BBR 与队列：
 
@@ -268,9 +289,11 @@ net.core.default_qdisc = fq
 应用后必须重建已有 SSH 隧道，否则老连接仍是 cubic：
 
 ```powershell
-# 只杀掉带 7891 转发的那个 ssh，不要误伤其他 SSH 会话
+# 只杀掉带这条完整 -L 转发的 ssh，不要误伤其他 SSH 会话
+$forward = '127.0.0.1:7891:127.0.0.1:7890'
+$pattern = '(?<![0-9.])' + [regex]::Escape($forward) + '(?![0-9])'
 Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" |
-    Where-Object { $_.CommandLine -match '7891' } |
+    Where-Object { $_.CommandLine -and $_.CommandLine -match $pattern } |
     ForEach-Object { Stop-Process -Id $_.ProcessId }
 
 ssh -N -L 127.0.0.1:7891:127.0.0.1:7890 claude-vps

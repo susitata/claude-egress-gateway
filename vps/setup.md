@@ -4,7 +4,7 @@
 
 > 本文以 Amazon Linux 2023 为例（`ec2-user`、`dnf`）。Debian/Ubuntu 把 `dnf` 换成 `apt` 即可；systemd 逻辑一致，但重启 SSH 的单元名不同（Debian/Ubuntu 是 `ssh`，AL2023 是 `sshd`）。
 >
-> **以下命令除特别说明外，都在仓库根目录执行**（即 `vps/setup.md` 的上一级）。
+> **以下命令除特别说明外，都在 VPS 上执行**，并且需要先把仓库放到 VPS（`git clone` 或 `scp -r`），在仓库根目录运行。`sudo`、`dnf`、`systemctl` 在 Windows PowerShell 里执行会直接失败。
 
 ---
 
@@ -34,7 +34,7 @@
 
 ## 2. 安装 sing-box
 
-从 [sing-box releases](https://github.com/SagerNet/sing-box/releases) 下载与架构对应的 `linux-amd64` 压缩包，解压后把二进制放到 `/usr/local/bin`：
+从 [sing-box releases](https://github.com/SagerNet/sing-box/releases) 下载与架构对应的 `linux-amd64` 压缩包。示例配置按 `1.14.x` 语法编写；解析规则、DNS server 与 `action` 字段在不同版本间有变化，部署前**必须**先跑 `sing-box check`。解压后把二进制放到 `/usr/local/bin`：
 
 ```bash
 tar -xzf sing-box-*-linux-amd64.tar.gz
@@ -68,12 +68,14 @@ sudo chmod 0640 /etc/sing-box/config.json
 sudo -u sing-box /usr/local/bin/sing-box check -c /etc/sing-box/config.json
 ```
 
-关键点只有两条：
+关键点：
 
 - `listen: "127.0.0.1"` —— 绑定回环，外网无法直连；
 - `outbound: direct` —— 这台机器的公网 IP 就是最终出口。
 
-如果以后需要给其他流量做分流，再加 inbound/outbound 与 `route.rules`；**但不要让 Claude 专用的那条路径经过任何规则**，否则出口 IP 就不再是这台机器。
+示例还带了一组拒绝规则。第一条 `action: "resolve"` 先用独立 DNS 服务器（DoT：`1.1.1.1:853`，SNI `cloudflare-dns.com`）解析目标域名，后面的 `ip_is_private` 与扩展 CIDR 才能看到解析结果；没有这条，IP 规则只对 IP 字面量生效。`domain_suffix` 额外拦住 `localdomain`、`*.internal`、`instance-data`、`*.svc` 这类常见的私有/元数据别名。它们挡的是"浏览器把 VPS 自己的回环、私网或云元数据当成目标"。规则使用 1.11+ 的 `action: "reject"`，不再依赖已弃用的 `block` outbound 和 `outbound` 规则字段。即使有 `resolve`，仍建议按 [`../docs/security.md`](../docs/security.md) 第 7 节加一条按 `sing-box` 用户过滤的出站防火墙规则：它不依赖 sing-box 的解析路径，是独立的第二道防线。
+
+如果以后需要给其他流量做分流，再加 inbound/outbound 与 `route.rules`；**但不要让 Claude 专用的那条路径经过任何会改变出口的规则**，否则出口 IP 就不再是这台机器。
 
 ### systemd 单元
 
@@ -153,20 +155,20 @@ Host claude-vps
     ExitOnForwardFailure yes
 ```
 
-测试转发是否真的工作（这一步比 `ssh` 是否登录成功更有意义）：
+测试转发是否真的工作（以下命令在**本机**执行，这一步比 `ssh` 是否登录成功更有意义）：
 
-```bash
+```powershell
 ssh -f -N -L 127.0.0.1:7891:127.0.0.1:7890 claude-vps   # -f: 认证后转后台，不阻塞
-curl.exe -s --noproxy "" -x http://127.0.0.1:7891 https://ipwho.is/
+curl.exe -s --noproxy= -x http://127.0.0.1:7891 https://ipwho.is/
 ```
 
 返回的 `ip` 必须等于 `YOUR_VPS_IP`。不等就说明流量没走隧道（常见原因：本机还有 TUN 类客户端劫持了到 VPS 的连接，见 [`../docs/troubleshooting.md`](../docs/troubleshooting.md) 第 5 条）。
 
 ---
 
-## 6. 换 Elastic IP 时要同步的四件事
+## 6. 换 Elastic IP 时要同步的五件事
 
-换 IP 是排障手段之一（历史信誉由 IP 承载），但它是一个**跨四处**的操作，漏一处就会以"隧道通了但出口校验失败"的形式暴露：
+换 IP 是排障手段之一（历史信誉由 IP 承载），但它是一个**跨五处**的操作，漏一处就会以"隧道通了但出口校验失败"的形式暴露：
 
 1. 云端把 EIP 重新关联到实例（关联后旧的公网 IPv4 会被释放）。
 2. 本机 `~/.ssh/config` 的 `HostName`。
@@ -183,10 +185,10 @@ curl.exe -s --noproxy "" -x http://127.0.0.1:7891 https://ipwho.is/
 
 ## 7. 加固
 
-最低限度用 **drop-in** 写，而不是改主配置——cloud-init 的 `50-cloud-init.conf` 可能覆盖主文件里的同名项：
+最低限度用 **drop-in** 写，而不是改主配置。文件名请用 `00-egress.conf` 以保证优先级：sshd 对同一项取"首次出现的值"，并按文件名字典序读取 drop-in，`50-cloud-init.conf` 会先于 `99-egress.conf` 生效，写在 99 里可能等于没写。
 
 ```bash
-sudo tee /etc/ssh/sshd_config.d/99-egress.conf >/dev/null <<'EOF'
+sudo tee /etc/ssh/sshd_config.d/00-egress.conf >/dev/null <<'EOF'
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitRootLogin no
@@ -199,7 +201,7 @@ LoginGraceTime 20
 EOF
 ```
 
-`PermitOpen` 很关键：即使密钥泄露，拿到它的人也只能把转发指向 VPS 的 7890，不能拿这台机器当通用跳板。
+`PermitOpen` 只限制 **SSH 端口转发**的目标：即使密钥泄露，拿到它的人也只能把转发指向 VPS 的 7890。它**不限制**登录 shell、`scp`/`sftp` 或从这台机器主动发起连接；要让它不成为通用跳板，还需要限制账号的 shell/命令（专用的转发用户或 `ForceCommand`），或在网络层限制出站。
 
 验证**生效值**（不是文件内容）：
 
@@ -220,6 +222,6 @@ sudo systemctl restart sshd   # Amazon Linux 2023
 
 - [ ] `ss -lntp` 里 7890 只监听 `127.0.0.1`
 - [ ] `sysctl net.ipv4.tcp_congestion_control` 为 `bbr`
-- [ ] 本地 `curl -x http://127.0.0.1:7891 https://ipwho.is/` 返回 `YOUR_VPS_IP`
+- [ ] 本地 `curl.exe --noproxy= -x http://127.0.0.1:7891 https://ipwho.is/` 返回 `YOUR_VPS_IP`
 - [ ] 隧道**重建之后**再测一次速度（旧连接不会自动变快）
 - [ ] 安全组只放行 22

@@ -2,21 +2,60 @@
 *.pem
 *.key
 *.ppk
-id_rsa*
+id_*
+*.p12
+*.pfx
 .env
 .env.*
+*.secret.json
 
 # --- local config (real IPs, real ports) -----------------------------------
 browser/config.local.json
+browser/config.*.json
+!browser/config.example.json
 config/*.local.json
+config.json
 *.local.json
+*.local.*
+credentials.json
+.netrc
+.npmrc
+.pypirc
+
+# --- ssh / logs ------------------------------------------------------------
+known_hosts
+known_hosts.old
+authorized_keys
+*.log
+
+# --- captures / temp -------------------------------------------------------
+*.har
+*.pcap
+*.bak
+*.tmp
+*.orig
+*.swp
+
+# --- keys / certs / vpn ----------------------------------------------------
+*.crt
+*.csr
+*.der
+*.kdbx
+*.ovpn
+.aws/
 
 # --- runtime state ---------------------------------------------------------
 profiles/
 output/
 screenshots/
+Cookies
+Local State
+*.sqlite
 *.png
 !docs/**/*.png
+*.jpg
+*.jpeg
+*.webp
 
 # --- python ----------------------------------------------------------------
 .venv/

@@ -3,6 +3,20 @@
     "level": "warn",
     "timestamp": true
   },
+  "dns": {
+    "servers": [
+      {
+        "type": "tls",
+        "tag": "public",
+        "server": "1.1.1.1",
+        "server_port": 853,
+        "tls": {
+          "server_name": "cloudflare-dns.com"
+        },
+        "detour": "direct"
+      }
+    ]
+  },
   "inbounds": [
     {
       "type": "mixed",
@@ -16,5 +30,50 @@
       "type": "direct",
       "tag": "direct"
     }
-  ]
+  ],
+  "route": {
+    "rules": [
+      {
+        "action": "resolve",
+        "server": "public",
+        "strategy": "prefer_ipv4"
+      },
+      {
+        "ip_is_private": true,
+        "action": "reject"
+      },
+      {
+        "ip_cidr": [
+          "0.0.0.0/8",
+          "127.0.0.0/8",
+          "100.64.0.0/10",
+          "169.254.0.0/16",
+          "192.0.0.0/24",
+          "198.18.0.0/15",
+          "224.0.0.0/4",
+          "240.0.0.0/4",
+          "::1/128",
+          "fe80::/10",
+          "fc00::/7",
+          "::ffff:0:0/96"
+        ],
+        "action": "reject"
+      },
+      {
+        "domain_suffix": [
+          "localhost",
+          "local",
+          "localdomain",
+          "localtest.me",
+          "nip.io",
+          "sslip.io",
+          "xip.io",
+          "internal",
+          "instance-data",
+          "svc"
+        ],
+        "action": "reject"
+      }
+    ]
+  }
 }

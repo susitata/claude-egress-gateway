@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from patchright.sync_api import sync_playwright  # noqa: E402
 
-from launch import build_kwargs, load_config  # noqa: E402
+from launch import build_kwargs, load_config, preflight, verify_browser_egress  # noqa: E402
 
 JS = """() => performance.getEntriesByType('resource').map(r => ({
   name: r.name,
@@ -38,9 +38,12 @@ def main() -> None:
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+    preflight(cfg)  # probes must not bypass the fail-closed gates
     kwargs = build_kwargs(cfg, args.profile, True)
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(**kwargs)
+        if cfg.get("fail_closed", True):
+            verify_browser_egress(context, cfg["expected_ip"])
         page = context.pages[0] if context.pages else context.new_page()
         try:
             page.goto(args.url, wait_until="domcontentloaded", timeout=60000)

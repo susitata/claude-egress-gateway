@@ -11,8 +11,8 @@
 | 本地系统 | Windows 11 |
 | SSH 客户端 | OpenSSH（`ssh.exe`） |
 | 本地路径 | `C:\Users\<you>` |
-| VPS | 美国东部区域，Amazon Linux 2023 |
-| 隧道命令 | `ssh -N -L 7891:127.0.0.1:7890 claude-vps` |
+| VPS | 海外区域，Amazon Linux 2023 |
+| 隧道命令 | `ssh -N -L 127.0.0.1:7891:127.0.0.1:7890 claude-vps` |
 | VPS 入站 | sing-box mixed inbound `127.0.0.1:7890` |
 | VPS 出站 | `direct`，无上游代理 |
 | CDN / 专线 | 无，未做任何 CDN 或中转优化 |
@@ -24,7 +24,7 @@
 ### 2.1 单流下载 1 MB
 
 ```powershell
-curl.exe -o NUL -w "%{speed_download} %{time_total} %{time_appconnect}\n" -x http://127.0.0.1:7891 "https://speed.cloudflare.com/__down?bytes=1000000"
+curl.exe -o NUL --noproxy= -w "%{speed_download} %{time_total} %{time_connect} %{time_appconnect}\n" --max-time=60 -x http://127.0.0.1:7891 "https://speed.cloudflare.com/__down?bytes=1000000"
 ```
 
 - Windows 上必须写 `curl.exe`；PowerShell 里的 `curl` 是 `Invoke-WebRequest` 的别名。
@@ -40,7 +40,7 @@ PowerShell（`Start-Job`）：
 ```powershell
 $jobs = 1..4 | ForEach-Object {
   Start-Job {
-    curl.exe -s -o NUL -w "%{speed_download}\n" -x http://127.0.0.1:7891 "https://speed.cloudflare.com/__down?bytes=2000000"
+    curl.exe -s -o NUL --noproxy= -w "%{speed_download}\n" -x http://127.0.0.1:7891 "https://speed.cloudflare.com/__down?bytes=2000000"
   }
 }
 $speeds = $jobs | Wait-Job | Receive-Job | ForEach-Object { [double]$_ }
@@ -50,7 +50,7 @@ $speeds = $jobs | Wait-Job | Receive-Job | ForEach-Object { [double]$_ }
 bash / xargs（`-P4`）等价写法：
 
 ```bash
-seq 4 | xargs -P4 -I{} curl -s -o /dev/null -w "%{speed_download}\n" -x http://127.0.0.1:7891 "https://speed.cloudflare.com/__down?bytes=2000000" | awk '{s+=$1} END {printf "aggregate = %.1f KB/s\n", s/1024}'
+seq 4 | xargs -P4 -I{} curl -s -o /dev/null --noproxy= -w "%{speed_download}\n" -x http://127.0.0.1:7891 "https://speed.cloudflare.com/__down?bytes=2000000" | awk '{s+=$1} END {printf "aggregate = %.1f KB/s\n", s/1024}'
 ```
 
 聚合值 = 4 个 `speed_download` 之和再 ÷1024，不要把单个并发流的值当成聚合值。
@@ -58,7 +58,7 @@ seq 4 | xargs -P4 -I{} curl -s -o /dev/null -w "%{speed_download}\n" -x http://1
 ### 2.3 出口 IP 与路径确认
 
 ```powershell
-curl.exe -s -x http://127.0.0.1:7891 https://ipwho.is/
+curl.exe -s --noproxy= -x http://127.0.0.1:7891 https://ipwho.is/
 ```
 
 返回的 `country` / `region` 应落在 VPS 所在区域。若出口 IP 与预期不符，后面所有吞吐数字都没有比较意义。
@@ -149,7 +149,7 @@ sudo sysctl -w net.core.default_qdisc=fq
 切换完成后必须重建隧道：
 
 ```bash
-ssh -N -L 7891:127.0.0.1:7890 claude-vps
+ssh -N -L 127.0.0.1:7891:127.0.0.1:7890 claude-vps
 ```
 
 只要第 3 步里单流吞吐相对第 2 步明显上升，就说明改动生效；如果没变，先检查隧道是否真的重建，再怀疑参数。

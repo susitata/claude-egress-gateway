@@ -1,111 +1,110 @@
 # Claude Egress Gateway
 
-> Route **all** Claude traffic (Claude Code + claude.ai) through a self-hosted VPS with a fixed, verifiable egress IP — and **fail closed** when the tunnel is down, never falling back to a direct connection.
->
-> 把 Claude Code 与 claude.ai 的**全部**流量经自建 VPS 出口，出口 IP 固定且每次启动可校验；链路不通时**直接失败**，绝不回退直连。
+把 Claude Code 和 claude.ai 的 TCP 流量经一条 SSH 隧道送到你自己的 VPS，让 Anthropic 看到的源 IP 是同一个（仅限经这条代理的 TCP）。默认配置下，隧道不通时启动直接失败，不会悄悄退回直连。
+
+> English summary at the end.
 
 ---
 
-## Why / 为什么
+## 它解决什么问题
 
-**EN** — Using Claude from a network where the direct path is slow, unstable, or geolocated elsewhere causes three recurring problems: the account sees multiple countries, the web app is stuck behind a bot challenge, and a "smart" proxy silently falls back to a direct connection at the worst moment. This project addresses all three with a deliberately boring design: one SSH tunnel, one fixed egress IP, one fail-closed check before anything starts.
+直连不稳定，或者你希望 Claude 的出口 IP 长期固定（账号不要今天从 A 国、明天从 B 国登录），通常会挂一个代理。问题在于多数代理是"尽力而为"的：PAC 末尾带 `DIRECT`、客户端切节点、代理挂了自动直连。出了问题时，你无法从结果判断这次到底走了哪条路。
 
-**中文** — 在直连不稳定、或地理归属不一致的网络里使用 Claude，会反复遇到三个问题：账号被看到从多个国家访问、网页端卡在人机验证、以及"智能"代理在关键时刻静默回退直连。本项目的设计刻意做得"笨"：一条 SSH 隧道、一个固定出口 IP、启动前一次 fail-closed 校验。
-
----
-
-## Architecture / 架构
-
-```
-┌────────────────────────── local machine ─────────────────────────┐
-│  Claude Code (CLI)                    Chrome (Patchright)         │
-│        │                                     │                   │
-│        │ HTTPS_PROXY=http://127.0.0.1:7891   │ fixed proxy.server│
-│        └──────────────┬──────────────────────┘                   │
-│                       ▼                                          │
-│            127.0.0.1:7891  ← ssh -L local forward                │
-│                       │                                          │
-│  other traffic → TUN client ─┐   (bypassed by a /32 route)       │
-└──────────────────────────────┼───────────────────────────────────┘
-                               │ Internet
-                               ▼
-┌──────────────── VPS (region with a good egress) ─────────────────┐
-│  public IPv4: YOUR_VPS_IP                                        │
-│  sshd :22 ── port forward → sing-box mixed inbound 127.0.0.1:7890 │
-│  sing-box outbound: direct                                       │
-│  kernel: tcp_congestion_control=bbr, default_qdisc=fq            │
-└──────────────────────────┬───────────────────────────────────────┘
-                           ▼
-              api.anthropic.com / claude.ai
-              (egress IP = YOUR_VPS_IP)
-```
-
-**Core idea / 核心思想** — Do not expose a proxy port on the VPS at all. Borrow the SSH tunnel instead: only port 22 is needed, no proxy protocol client is installed locally, and the attack surface stays minimal.
-
-不在 VPS 上开放任何代理端口，而是借用 SSH 隧道：只需要 22 端口，本机不需要装任何代理协议客户端，暴露面最小。
+这个项目只做一件事：一条固定的 SSH 隧道，加启动前后对出口 IP 的实测。默认配置下，任何一项检查不满足就报错退出。
 
 ---
 
-## Features / 特性
+## 适用条件
 
-| | |
+先确认这些条件都成立，再往下看：
+
+- **一台 Linux VPS，有固定的公网 IPv4。** 本项目按 AWS EC2 + Elastic IP 写，其他云厂商同理，只需要一个不会变的地址。
+- **愿意自己维护这台机器。** 系统更新、SSH、sing-box 都由你负责；仓库里没有托管服务。
+- **客户端是 Windows 10/11。** 脚本用 PowerShell，依赖 `Get-NetTCPConnection`、`Get-CimInstance`。Linux/macOS 可以手工敲隧道命令，但脚本需要自己移植。
+- **只需要 TCP。** 浏览器和 CLI 的 HTTP/HTTPS 在这个范围内；UDP（WebRTC、QUIC）和 IPv6 不在。
+- **能接受固定成本。** EC2 实例费用另计；公网 IPv4 自 2024-02-01 起约 `$0.005/小时`（约 `$3.65/月`），Elastic IP 未绑定实例时同样计费。
+
+以下情况不适合用它：
+
+- 想要"隐藏身份"或绕过平台风控。机房 IP 的信誉不会因为换了一条隧道而改变；claude.ai 的 Cloudflare 挑战在机房 IP 上通常要 30–90 秒。
+- 想要整机全局代理。这里覆盖的是**本次启动的进程**，不是整台机器。
+- 不想维护服务器。
+
+---
+
+## 保证与不保证
+
+| 保证 | 不保证 |
 |---|---|
-| **Fail-closed** | Preflight verifies the port, **who owns it** (must be the expected `ssh.exe` forward), the egress IP, and API reachability. Any failure aborts — no silent direct fallback, and no "pinning" is optional. <br> 启动前校验本地端口、**端口属主**（必须是期望的 ssh 转发）、出口 IP、API 可达性；任一失败即中止，**不会**静默回退直连，出口 IP 也不允许不设。 |
-| **Fixed exit** | A single Elastic IP, verified on every launch — including when the browser is started directly. <br> 固定 Elastic IP，每次启动都核对——直接启动浏览器时同样核对。 |
-| **Fast on lossy paths** | BBR + fq on the VPS. Measured 7–15× single-stream improvement (14→217 KB/s); 4 concurrent ≈2.7× (87→237 KB/s). <br> VPS 开 BBR + fq：单流提升 7–15 倍（14→217 KB/s），4 并发约 2.7 倍（87→237 KB/s）。 |
-| **No PAC** | PAC returns `PROXY x; DIRECT`, which falls back to direct. A fixed `proxy.server` fails instead. <br> PAC 会 `PROXY; DIRECT` 回退直连；固定代理直接失败。 |
-| **Real browser** | Patchright + the locally installed Chrome, persistent profile, real GPU, no JS hooks. <br> Patchright + 本机真实 Chrome，持久化 profile，不注入 JS。 |
-| **Self-diagnosing** | Three `probe_*.py` scripts for environment, resource timing, and login flow. <br> 三个诊断脚本，分别定位环境、资源加载、登录流程问题。 |
+| 启动前经代理实测出口 IP，并与 `-ExpectedIp` / `expected_ip` 比对 | 整机所有流量。IDE 插件、其它终端里已开的 `claude`、你自己平时用的浏览器都不在范围内 |
+| 监听 `7891` 的进程必须是绝对路径的系统 `ssh.exe`，`-L` 值与期望转发完全一致，且主机别名是最后一个参数 | 上述进程的 HTTP/HTTPS 仍有例外：git-over-SSH、部分 MCP server，以及自带网络栈或显式绕过代理的工具；git HTTPS 远端与 npm/npx/uvx 通常继承 `HTTPS_PROXY` |
+| 任一检查失败即中止；CLI 没有直连回退，浏览器不使用 PAC | UDP、ICMP、IPv6。WebRTC 直接发 UDP，HTTP 代理管不到 |
+| 浏览器使用单一 `proxy.server`（无 PAC、无候选），loopback 始终绕过代理；Chrome 启动后再由 Chrome 自己复核出口 IP | 企业代理策略/扩展仍可能覆盖 `--proxy-server`；启动后复核会中止，但无法阻止策略本身存在。也不保证绕过平台风控，或让机房 IP 变得"像住宅" |
+| VPS 只开放 TCP 22，代理端口不对外监听 | 本机已有权限的攻击者。`7891` 默认无认证 |
+
+这些边界在 [`docs/security.md`](docs/security.md) 里有逐条说明。
+
+浏览器的 `fail_closed: false` 不是一个"失败后自动直连"的开关：它只是跳过代理可达性、出口 IP 检查和启动后的 Chrome 复核，并允许覆盖代理的 `browser_args`。如果 `proxy.server` 指向一个不可达的代理，浏览器仍然启动失败；只有 `proxy.server` 为空或被参数覆盖掉时，Chrome 才会退回系统代理或直连（启动器日志写 `system/default`）。上表描述的是默认值 `true` 下的行为。
 
 ---
 
-## Quick start / 快速开始
+## 架构
 
-### 0. Prerequisites / 前置
-
-- A Linux VPS with a public IPv4 (this project uses an Elastic IP).
-- SSH key access to it.
-- Windows 10/11 with OpenSSH client (or adapt the tunnel command to Linux/macOS).
-- Python 3.11+ (only for the browser part).
-
-### 1. VPS setup / VPS 配置
-
-See [`vps/setup.md`](vps/setup.md). The snippet below assumes §2–3 of that page are already done (binary installed, `sing-box` user and `/etc/sing-box` created, systemd unit written). / 下面的片段**假定**你已完成 `vps/setup.md` 第 2–3 节（安装二进制、创建用户与目录、写 systemd 单元）。简版：
-
-```bash
-# sing-box: mixed inbound on 127.0.0.1:7890, direct outbound
-sudo cp vps/sing-box.example.json /etc/sing-box/config.json
-sudo systemctl enable --now sing-box
-
-# BBR: this is not optional, see docs/benchmarks.md
-sudo modprobe tcp_bbr
-echo 'net.ipv4.tcp_congestion_control = bbr' | sudo tee /etc/sysctl.d/99-bbr.conf
-echo 'net.core.default_qdisc = fq'          | sudo tee -a /etc/sysctl.d/99-bbr.conf
-echo 'tcp_bbr'                              | sudo tee /etc/modules-load.d/tcp_bbr.conf
-sudo sysctl --system
+```
+本机 (Windows)
+  Claude Code ── HTTPS_PROXY=127.0.0.1:7891 ──┐
+  Chrome (Patchright) ── proxy.server=... ────┴──> ssh -L 127.0.0.1:7891
+                                                        │  (仅 TCP 22)
+VPS                                                     v
+  sshd :22 ──本地转发──> sing-box mixed 127.0.0.1:7890 ──direct──> api.anthropic.com
+  tcp_congestion_control=bbr, default_qdisc=fq
 ```
 
-Security group: allow **22 only**. Nothing else needs to be open.
+VPS 上不开放任何代理端口。本机不需要安装 sing-box 或其它代理协议客户端，SSH 客户端就够了。
 
-安全组只放行 **22**，其余不需要。
+---
 
-### 2. SSH alias / SSH 别名
+## 快速开始
 
-`~/.ssh/config`:
+### 0. 前置
+
+- Linux VPS + 固定公网 IPv4（本项目用 Elastic IP）。
+- 能免密 SSH 登录这台机器。
+- Windows 10/11，自带 OpenSSH 客户端。
+- 浏览器部分另需：本机已安装 Chrome、Python 3.11+。
+
+### 1. VPS
+
+完整步骤见 [`vps/setup.md`](vps/setup.md)：安装 sing-box、配置 mixed inbound、启用 BBR + fq、加固 sshd。注意其中的命令要在 **VPS 上**执行，且需要先把仓库放到 VPS。
+
+要点：
+
+- sing-box 只监听 `127.0.0.1:7890`。示例配置先用 `action: "resolve"` 解析目标域名，再按解析结果拒绝私网/回环/云元数据地址；仍建议叠加 VPS 防火墙兜底（见 `docs/security.md` 第 7 节）。
+- 安全组只放行 `22/tcp`。
+- BBR 不是可选项；改完必须重建 SSH 隧道，老连接不会热切换。
+
+### 2. SSH 别名
+
+`~/.ssh/config`：
 
 ```
 Host claude-vps
     HostName YOUR_VPS_IP
-    User ec2-user          # Debian/Ubuntu images use 'ubuntu' or 'debian'
+    User ec2-user
     IdentityFile C:/Users/<you>/.ssh/your-key.pem
     IdentitiesOnly yes
-    StrictHostKeyChecking yes
     AddressFamily inet
     ServerAliveInterval 15
     ServerAliveCountMax 4
 ```
 
-Run `ssh claude-vps` once interactively to accept the host key; the tunnel uses `BatchMode=yes` and will not answer a prompt.
+首次连接时，先在云控制台核对主机指纹，再接受：
+
+```powershell
+ssh -o StrictHostKeyChecking=accept-new claude-vps
+```
+
+核对无误后，把 `StrictHostKeyChecking yes` 加进上面的配置。隧道使用 `BatchMode=yes`，不会替你回答任何提示。
 
 ### 3. Claude Code
 
@@ -114,109 +113,94 @@ powershell -ExecutionPolicy Bypass -File scripts\start-claude-egress.ps1 `
     -SshHost claude-vps -ExpectedIp YOUR_VPS_IP -Claude
 ```
 
-It verifies the tunnel, the egress IP, and `api.anthropic.com`, then sets `HTTPS_PROXY` and starts `claude`.
+脚本会依次检查：本地端口、端口属主、经隧道测到的出口 IP、`api.anthropic.com` 可达性。全部通过后设置 `HTTPS_PROXY` 并启动 `claude`。
 
-校验隧道 → 出口 IP → API 可达，然后设置 `HTTPS_PROXY` 并启动 `claude`。
+`-ExpectedIp` 也可以通过环境变量 `CLAUDE_EGRESS_EXPECTED_IP` 提供。两者都没有时会拒绝启动——这是有意为之。
 
-### 4. Web (optional) / 网页端（可选）
+### 4. 浏览器（可选）
+
+浏览器部分依赖 [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright)，它不是标准库，需要先建虚拟环境：
+
+```powershell
+python -m venv browser\.venv
+browser\.venv\Scripts\Activate.ps1
+pip install -r browser\requirements.txt
+
+copy browser\config.example.json browser\config.local.json
+# 编辑 config.local.json：proxy.server 与 expected_ip
+python browser\launch.py --config config.local.json --profile claude
+```
+
+细节见 [`browser/README.md`](browser/README.md)。`config.local.json` 已被 `.gitignore` 排除。`fail_closed: true` 且 `expected_ip` 为空时会拒绝启动，同样是故意的；把它设成 `false` 会关闭代理可达性、出口 IP 和启动后 Chrome 复核这三道检查，并允许覆盖代理的启动参数——这是显式的降级，不建议。
+
+也可以用编排脚本一次完成隧道检查与浏览器启动：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\start-claude-egress.ps1 `
-    -SshHost claude-vps -ExpectedIp YOUR_VPS_IP -Web -BrowserDir C:\path\to\browser
+    -SshHost claude-vps -ExpectedIp YOUR_VPS_IP -Web -BrowserDir .\browser
 ```
 
-Copy `browser/config.example.json` → `browser/config.local.json`, set `proxy.server` **and** `expected_ip`, then run:
+`-BrowserDir` 相对于你的当前目录解析，请在仓库根目录执行，或直接传绝对路径。编排脚本会把本次实际校验的 `-LocalPort` 通过 `--proxy-server` 传给 `launch.py`，所以浏览器不会用到 `config.local.json` 里另一个端口。
 
-复制 `browser/config.example.json` 为 `config.local.json`，填好 `proxy.server` **和** `expected_ip`，再运行：
-
-```powershell
-python browser/launch.py --config config.local.json --profile claude
-```
-
-`fail_closed: true` with an empty `expected_ip` refuses to start — that is intentional.
-
-> **Note on the first page load / 首次加载** — claude.ai serves a Cloudflare challenge on datacenter IPs. Expect 30–90 s before the login form appears. It is not stuck; do not close the window.
-> 机房 IP 上 claude.ai 会出 Cloudflare 验证页，通常 30–90 秒后才出现登录框，不是卡死，别关窗口。
+首次打开 claude.ai 时，机房 IP 会触发 Cloudflare 挑战，通常等 30–90 秒才出现登录框。不是卡死，别关窗口。
 
 ---
 
-## Project layout / 目录结构
+## 实测数据
 
-```
-.
-├── scripts/
-│   ├── start-claude-egress.ps1   # orchestration + fail-closed preflight
-│   ├── watch-tunnel.ps1          # keep the tunnel alive
-│   └── claude-menu.bat           # double-click menu
-├── browser/
-│   ├── launch.py                 # persistent Chrome launcher
-│   ├── config.example.json
-│   ├── requirements.txt
-│   └── probes/                   # env / resource-timing / login diagnostics
-├── vps/
-│   ├── setup.md
-│   ├── sing-box.example.json
-│   └── sysctl-bbr.conf
-└── docs/
-    ├── architecture.md           # design and chain (中文)
-    ├── security.md               # coverage boundary + hardening (中文)
-    ├── lessons.md                # field conclusions and pitfalls (中文)
-    ├── troubleshooting.md        # symptom → cause → fix (中文)
-    └── benchmarks.md             # measured numbers (中文)
-```
+同一条链路、同一时段，VPS 从默认 `cubic` 切到 `bbr + fq`：
 
----
-
-## Measured results / 实测数据
-
-| Scenario / 场景 | Before / 修复前 | After / 修复后 |
+| 场景 | cubic | bbr + fq |
 |---|---|---|
-| 1 MB single stream, through tunnel | 14 KB/s (60 s timeout) | 217 KB/s (4.6 s) |
-| 4 concurrent × 2 MB | 87 KB/s aggregate | 237 KB/s aggregate |
-| TLS handshake through tunnel | 4–19 s | 0.8–1.9 s |
-| claude.ai assets | many `ERR_ABORTED` | 25/25 HTTP 200 |
+| 单流 1 MB | 14 KB/s，60 秒超时 | 217 KB/s，4.6 秒 |
+| 4 并发 × 2 MB 聚合 | 87 KB/s | 237 KB/s |
+| TLS 握手 | 4–19 秒 | 0.8–1.9 秒 |
+| claude.ai 资源 | 大量 `ERR_ABORTED` | 25/25 HTTP 200 |
 
-Numbers depend on the path between you and the region. See [`docs/benchmarks.md`](docs/benchmarks.md).
-
-数据取决于你与机房之间的链路，详见 [`docs/benchmarks.md`](docs/benchmarks.md)。
+绝对值取决于你和 VPS 之间的路径。可复现的是变化方向，复测方法见 [`docs/benchmarks.md`](docs/benchmarks.md)。
 
 ---
 
-## Documentation / 文档
+## 已知限制
 
-| Doc | Content / 内容 |
+- **WebRTC 绕过 HTTP 代理。** `--proxy-server` 只代理 TCP；`RTCPeerConnection` 会直接向 STUN 服务器发 UDP，暴露本机真实出口。Chrome 156 上 `--force-webrtc-ip-handling-policy` 实测无效，只能靠网络层（TUN 或防火墙阻断 UDP）解决。
+- **覆盖范围是进程级。** 只有本次启动的 `claude` 或 Chrome 实例被覆盖。
+- **`7891` 默认没有认证。** 本机任何进程都能借用你的出口，行为会归因到你。可用 sing-box `users` 加 `-ProxyUser`/`-ProxyPassword` 启用认证。
+- **单点。** VPS 挂了就没有出口。
+- **TCP over TCP。** 单条 SSH 隧道有队头阻塞和并发上限，不适合高并发或 UDP 场景。
+
+---
+
+## 文档
+
+| 文档 | 内容 |
 |---|---|
-| [`docs/architecture.md`](docs/architecture.md) | Design, per-hop data flow, trade-offs, fail-closed gates. <br> 架构、逐跳数据流、取舍、四道闸。 |
-| [`docs/troubleshooting.md`](docs/troubleshooting.md) | 12 real failure cases: symptom → root cause → verification → fix. <br> 12 个真实故障案例。 |
-| [`docs/benchmarks.md`](docs/benchmarks.md) | cubic vs BBR measurements and the reproduction commands. <br> cubic/BBR 实测与复现命令。 |
-| [`docs/security.md`](docs/security.md) | What is and is not covered, plus the hardening checklist (WebRTC, DNS, IPv6, sandbox, ACLs, VPS). <br> 覆盖边界与加固清单。 |
-| [`docs/lessons.md`](docs/lessons.md) | Conclusions from the field: BBR, bot challenges, IP reputation, WebRTC, fingerprint layers, audit method. <br> 实测结论与踩坑记录。 |
-| [`vps/setup.md`](vps/setup.md) | VPS build, hardening, Elastic IP change checklist. <br> VPS 搭建、加固、换 IP 清单。 |
+| [`docs/architecture.md`](docs/architecture.md) | 逐跳数据流、关键取舍、五道检查 |
+| [`docs/security.md`](docs/security.md) | 覆盖边界、加固清单、自查命令 |
+| [`docs/troubleshooting.md`](docs/troubleshooting.md) | 12 个真实故障：现象 → 根因 → 验证 → 修复 |
+| [`docs/benchmarks.md`](docs/benchmarks.md) | cubic / BBR 实测与复测命令 |
+| [`docs/lessons.md`](docs/lessons.md) | BBR、Cloudflare、IP 信誉、WebRTC、审计方法 |
+| [`browser/README.md`](browser/README.md) | 浏览器依赖、配置字段、三个探测脚本 |
+| [`vps/setup.md`](vps/setup.md) | VPS 搭建、加固、换 Elastic IP 清单 |
 
-All Chinese docs assume the reader already has a working SSH key and a VPS. / 中文文档默认你已有可用的 SSH 密钥与 VPS。
-
----
-
-## Security notes / 安全说明
-
-- **No credentials are committed.** The sing-box example has an empty password; `.gitignore` excludes `*.pem`, `profiles/`, and local config.
-- **The VPS IP is a placeholder.** Replace `YOUR_VPS_IP` locally; do not commit it if you intend to keep the host private.
-- **This is not a guarantee against platform risk controls.** It is a consistency and reliability tool. Datacenter IPs are still datacenter IPs.
-- **Scope is per process, not per machine.** Only the `claude` process (or the Chrome instance) this launcher starts is covered. IDE extensions, other terminals, and proxy-unaware child processes can still go direct.
-- **WebRTC bypasses HTTP proxies, and browser flags do not fix it.** On Chrome 156 the `--force-webrtc-ip-handling-policy` switch is ignored (Chromium 41180783); only network-level blocking (TUN / firewall) works. Verify with `chrome://webrtc-internals` or CreepJS. A `/32` route does **not** fix UDP.
-- **Local port 7891 has no authentication.** Any local process can borrow your egress.
-
-- **不含任何凭据**，示例配置里没有密码，`.gitignore` 排除了密钥与本地配置。
-- **VPS IP 是占位符**，真实值不要提交。
-- **本项目不承诺绕过任何风控**，它解决的是"出口一致性与可靠性"。
-- **覆盖范围是进程级，不是整机**：只有本次启动的 `claude` 或 Chrome 实例被覆盖；IDE 插件、其它终端、不认代理的子进程仍可能直连。
-- **WebRTC 绕过 HTTP 代理，且浏览器参数修不掉**：Chrome 156 上 `--force-webrtc-ip-handling-policy` 实测无效（Chromium 41180783），只有网络层（TUN / 防火墙阻断 UDP）能解决，用 `chrome://webrtc-internals` 或 CreepJS 自查；`/32` 路由**不能**解决 UDP。
-- **本地 7891 无认证**：本机任何进程都能借用你的出口。
-
-完整清单见 [`docs/security.md`](docs/security.md)。
+`scripts/start-claude-egress.ps1` 另有两个明确的逃生口：`-AllowUnknownOwner`（无法识别端口属主时继续）和 `-AllowUnpinned`（`-CheckOnly` 时不比对 IP）。默认都关闭。
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT，见 [LICENSE](LICENSE)。
+
+---
+
+## English
+
+This is a small, fail-closed egress gateway for Claude Code and claude.ai.
+
+A single SSH local forward (`127.0.0.1:7891` → VPS `127.0.0.1:7890` → sing-box `direct`) sends the TCP traffic of the processes this launcher starts through one fixed public IPv4. Before anything is launched, the launcher measures the egress IP through that proxy and compares it with the pinned value; with the default `fail_closed: true`, any failure aborts instead of falling back to a direct connection. The browser half uses a fixed `proxy.server` (never a PAC file), verifies the same egress IP before opening Chrome, and then lets Chrome itself fetch the echo service once more, because a managed policy or proxy extension can outrank `--proxy-server`.
+
+Requirements: a Linux VPS with a fixed public IPv4 (written for AWS EC2 + Elastic IP), SSH key access, Windows 10/11 with PowerShell for the scripts, and Chrome + Python 3.11+ with `pip install -r browser/requirements.txt` for the browser part. Public IPv4 addresses cost about `$0.005/hour` on AWS even when the Elastic IP is unattached.
+
+It covers the launched processes only, over TCP. It does not proxy UDP (WebRTC bypasses HTTP proxies), IPv6, or the whole machine, and it does not claim to defeat platform risk controls or make a datacenter IP look residential.
+
+See [`docs/architecture.md`](docs/architecture.md), [`docs/security.md`](docs/security.md), and [`docs/troubleshooting.md`](docs/troubleshooting.md) for details (Chinese).

@@ -2,7 +2,7 @@
 
 这份文档只处理一类问题：**链路看起来"不通"或"卡住"，但你不知道断在哪一层。**
 
-项目把 Claude Code 与 claude.ai 的流量经一条 SSH 隧道送到自建 VPS 出口，本地 `127.0.0.1:7891` → VPS `127.0.0.1:7890`（sing-box mixed inbound），outbound 为 `direct`，安全组只开 22。设计是 fail-closed：任何一环不成立就失败，绝不回退直连。因此**看到报错不一定是坏事**，先判断它是"闸门正常工作"还是"链路真的坏了"。
+项目把 Claude Code 与 claude.ai 的流量经一条 SSH 隧道送到自建 VPS 出口，本地 `127.0.0.1:7891` → VPS `127.0.0.1:7890`（sing-box mixed inbound），outbound 为 `direct`，安全组只开 22。默认设计是 fail-closed：任何一环不成立就失败，不回退直连。因此**看到报错不一定是坏事**，先判断它是"闸门正常工作"还是"链路真的坏了"。
 
 下面 12 个案例全部来自真实排障，保留当时的数字与判据。IP、用户名、密钥一律用占位符表示。
 
@@ -29,11 +29,11 @@
 
 ## 1. 浏览器白屏，窗口一闪就关 <a id="case-1"></a>
 
-**现象**：Chrome 窗口出现、白屏，约 60 秒后自己消失；日志末尾常见 `page.goto: Timeout 60000ms exceeded`。
+**现象**：Chrome 窗口出现、一直白屏，不自己关闭；日志末尾常见 `[warn] page did not finish loading within 60s (TimeoutError); window stays open...`。旧版启动器会先打印 `page.goto: Timeout 60000ms exceeded`，然后退出并关窗；当前 `launch.py` 不会。
 
 **根因**：三层叠加。(a) `goto` 超时抛异常后，启动器若直接退出 `with sync_playwright()` 块，persistent context 被关闭，窗口随之消失——关窗的是代码，不是网络。(b) 隧道单流只有 14 KB/s，首页资源在 60 秒内拉不完。(c) 机房 IP 触发 Cloudflare 挑战，页面 30–90 秒内本来就不出登录框。
 
-**验证方法**：窗口是否稳定在 60 秒左右消失（是则第 a 层成立）；用 `curl -w` 测单流吞吐是否只有十几 KB/s（第 b 层）；DevTools 看主文档是否挑战页、窗口是否只是白屏（第 c 层）。
+**验证方法**：当前版本应看到窗口一直停住；若窗口约 60 秒后自己消失，说明你运行的是旧版启动器（第 a 层）。用 `curl -w` 测单流吞吐是否只有十几 KB/s（第 b 层）；DevTools 看主文档是否挑战页、窗口是否只是白屏（第 c 层）。
 
 **解决**：`launch.py` 捕获异常后不关窗，阻塞等待手动关闭：
 
@@ -41,7 +41,8 @@
 try:
     page.goto(start_url, wait_until="domcontentloaded", timeout=60000)
 except Exception as exc:
-    print(f"[warn] page did not finish in 60s ({type(exc).__name__}); window stays open")
+    print(f"[warn] page did not finish loading within 60s ({type(exc).__name__}); "
+          f"window stays open, refresh manually if needed")
 page.wait_for_event("close", timeout=0)   # 永不超时
 ```
 
@@ -79,8 +80,8 @@ performance.getEntriesByType('resource').map(r => ({
 
 ```powershell
 ssh -N -L 127.0.0.1:7892:127.0.0.1:7890 claude-vps
-curl.exe -o NUL -w "%{speed_download}\n" --max-time 60 -x http://127.0.0.1:7891 "https://speed.cloudflare.com/__down?bytes=1000000"
-curl.exe -o NUL -w "%{speed_download}\n" --max-time 60 -x http://127.0.0.1:7892 "https://speed.cloudflare.com/__down?bytes=1000000"
+curl.exe -o NUL --noproxy= -w "%{speed_download}\n" --max-time=60 -x http://127.0.0.1:7891 "https://speed.cloudflare.com/__down?bytes=1000000"
+curl.exe -o NUL --noproxy= -w "%{speed_download}\n" --max-time=60 -x http://127.0.0.1:7892 "https://speed.cloudflare.com/__down?bytes=1000000"
 ```
 
 旧 14 KB/s、新 104 KB/s；VPS 上 `ss -tin` 也能看到旧连接仍是 cubic。
@@ -98,14 +99,16 @@ curl.exe -o NUL -w "%{speed_download}\n" --max-time 60 -x http://127.0.0.1:7892 
 **验证方法**：
 
 ```powershell
-Get-NetTCPConnection -LocalPort 7891 -State Listen
+Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort 7891 -State Listen
 Get-Process ssh -ErrorAction SilentlyContinue
 ssh -v -N -L 127.0.0.1:7891:127.0.0.1:7890 claude-vps   # 看到 forward 成功后 Ctrl+C
 ```
 
 端口不监听就是隧道问题，不用翻浏览器配置。
 
-**解决**：补齐 `BatchMode=yes`、`ExitOnForwardFailure=yes`、`ConnectTimeout=10`、`ServerAliveInterval=15`、`ServerAliveCountMax=4`、`TCPKeepAlive=yes`；再用 `watch-tunnel.ps1` 每 20 秒查端口，不在就重拉，并放进启动项。最坏情况是"20 秒发现 + 10 秒重建等待"，约 30 秒不可用，而不是第二天才发现。
+**解决**：补齐 `BatchMode=yes`、`ExitOnForwardFailure=yes`、`ConnectTimeout=10`、`ServerAliveInterval=15`、`ServerAliveCountMax=4`、`TCPKeepAlive=yes`；再用 `watch-tunnel.ps1` 每 20 秒查端口与属主，不在就重拉，并放进启动项。
+
+恢复时间取决于断线形态：如果 `ssh.exe` 已经退出，最坏是"20 秒发现 + 10 秒重建等待"；如果是 TCP 半开、进程还活着，本地端口会一直处于 Listen，要等 `ServerAliveInterval=15 × ServerAliveCountMax=4`（约 60 秒）让 ssh 自己退出，之后再加 20 + 10 秒，最坏约 90 秒。看护脚本不主动探测数据面，所以这 60 秒内它看不出异常。
 
 ---
 
@@ -137,10 +140,10 @@ route -p add YOUR_VPS_IP mask 255.255.255.255 YOUR_LAN_GATEWAY metric 1
 
 ```powershell
 ssh -G claude-vps | findstr /i hostname
-curl.exe -s -x http://127.0.0.1:7891 https://api.ipify.org
+curl.exe -s --noproxy= -x http://127.0.0.1:7891 https://api.ipify.org
 ```
 
-**解决**：把清单上的引用全部改成新 IP。这个报错是 fail-closed 在正常工作，不是 bug；不要为了"先跑起来"删掉 `-ExpectedIp`——现在是**必填**（或设 `CLAUDE_EGRESS_EXPECTED_IP`），删掉只会把"启动失败"换成"悄悄走错出口"。
+**解决**：把清单上的引用全部改成新 IP。这个报错是 fail-closed 在正常工作，不是 bug；不要为了"先跑起来"删掉 `-ExpectedIp`——删掉会直接拒绝启动（step 0 的 `throw`），而不是退回直连。只有 `-CheckOnly` 配合显式 `-AllowUnpinned` 才会在不比对 IP 的情况下继续。
 
 ---
 
@@ -155,7 +158,7 @@ curl.exe -s -x http://127.0.0.1:7891 https://api.ipify.org
 **解决**：改用 `curl -w` 与 `Test-NetConnection`：
 
 ```powershell
-curl.exe -o NUL -w "connect=%{time_connect} tls=%{time_appconnect} speed=%{speed_download}\n" -x http://127.0.0.1:7891 https://api.anthropic.com/
+curl.exe -o NUL --noproxy= -w "connect=%{time_connect} tls=%{time_appconnect} speed=%{speed_download}\n" -x http://127.0.0.1:7891 https://api.anthropic.com/
 Test-NetConnection YOUR_VPS_IP -Port 22
 ```
 
@@ -187,7 +190,7 @@ Test-NetConnection YOUR_VPS_IP -Port 22
 & "$env:ProgramFiles\Google\Chrome\Application\chrome.exe" --user-data-dir="$env:TEMP\fresh-chrome" --proxy-server=http://127.0.0.1:7891 https://claude.ai/
 ```
 
-实测：普通 Chrome 走同一台美国东部 VPS 同样卡挑战页；同一浏览器换另一个商业出口则秒过。变量是出口 IP 的路径与信誉，不是自动化特征。
+实测：普通 Chrome 走同一台海外 VPS 同样卡挑战页；同一浏览器换另一个商业出口则秒过。变量是出口 IP 的路径与信誉，不是自动化特征。
 
 **解决**：不要在这个场景里换指纹。注意别用默认 profile 做对比，否则会把用户自己的窗口和登录态带出来；务必用独立 `--user-data-dir`，用完删除。
 
@@ -223,11 +226,11 @@ Test-NetConnection YOUR_VPS_IP -Port 22
 
 **现象**：页面读到的时区/语言与出口 IP 的 geo 不一致，或需要浏览器"看起来在出口地区"。
 
-**根因**：浏览器层由 CDP 覆盖 `timezone_id` 与 `locale`，应与出口自洽（出口在美国东部则 `America/New_York` + `en-US`）。示例配置即如此。
+**根因**：浏览器层由 CDP 覆盖 `timezone_id` 与 `locale`，应与出口自洽（例如出口在美国东部则 `America/New_York` + `en-US`）。示例配置用的是美国东部示例值，按你的出口地区改。
 
 **验证方法**：页面 Console 读 `Intl.DateTimeFormat().resolvedOptions().timeZone` 与 `navigator.language`，再与出口 IP 的 `country`/`region` 对照。
 
-**解决**：改 `config.local.json` 后重启浏览器。注意这只是浏览器上下文，**不改变系统时区**；Claude Code 默认不上报时区，唯一会带本地时间的是"定时/远程 agent"类技能拼 prompt 时的本地时间，系统时区差太多仍可能露出差异。
+**解决**：改 `config.local.json` 后重启浏览器。注意这只是浏览器上下文，**不改变系统时区**；启动器也不会改变 Claude Code 自身的任何时间/地区上报。
 
 ---
 
@@ -264,13 +267,13 @@ Test-NetConnection YOUR_VPS_IP -Port 22
 ```powershell
 # 1. 链路
 Test-NetConnection YOUR_VPS_IP -Port 22
-Get-NetTCPConnection -LocalPort 7891 -State Listen
+Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort 7891 -State Listen
 
 # 2. 出口
-curl.exe -s -x http://127.0.0.1:7891 https://api.ipify.org
+curl.exe -s --noproxy= -x http://127.0.0.1:7891 https://api.ipify.org
 
 # 3. 应用
-curl.exe -s -o NUL -w "%{http_code}\n" --max-time 20 `
+curl.exe -s --noproxy= -o NUL -w "%{http_code}\n" --max-time=20 `
   -x http://127.0.0.1:7891 https://api.anthropic.com/v1/messages
 ```
 
